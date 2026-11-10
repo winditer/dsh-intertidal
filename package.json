@@ -1,0 +1,72 @@
+{
+  "name": "dsh-intertidal",
+  "version": "0.1.0",
+  "description": "潮间（Intertidal）：让 DSH 按设定间隔把屏幕交给一片此刻的海，到点自己退走。天光跟随本地太阳位置，可用自己的图片或视频作海面。不采集数据。",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/host.js",
+  "exports": {
+    ".": "./src/host.js",
+    "./client": "./dist/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "cordis.patch.yml",
+    "screenshots.json",
+    "assets",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-market",
+    "intertidal",
+    "sea",
+    "ambience",
+    "screensaver",
+    "canvas"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/build.mjs --check",
+    "test": "node --test test/*.test.js",
+    "verify": "node scripts/build.mjs && node --test test/*.test.js",
+    "prepack": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.10"
+  },
+  "author": "winditer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/winditer/dsh-intertidal.git"
+  },
+  "homepage": "https://github.com/winditer/dsh-intertidal#readme",
+  "bugs": {
+    "type": "url",
+    "url": "https://github.com/winditer/dsh-intertidal/issues"
+  }
+}

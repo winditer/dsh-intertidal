@@ -1,0 +1,4 @@
+# dsh-intertidal bundle patch —— 同一份包提供宿主半片（src/host.js）与浏览器半片（dist/client.js）
+- insert:
+    - id: intertidal
+      name: 'dsh-intertidal'
