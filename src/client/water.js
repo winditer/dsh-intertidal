@@ -146,7 +146,7 @@ export function drawWater(ctx, view, field) {
   //   phase = d·LAYERS - t·SPEED（t 增大 → 同一道浪的 d 增大 → 屏幕上往下走 = 朝观察者推过来）
   // 再用低频噪声扭曲相位，使浪脊不是直线、而是被随机打断的弧形 —— 既有层次，又不是"一条一条"。
   // 速度取 0.115 道/秒：一道涌浪从地平线推到脚下大约 8–9 秒，慢到能看清，不像快进。
-  const LAYERS = 6.0 //   画面里同时能看到的涌浪道数
+  const LAYERS = 5.0 //   画面里同时能看到的涌浪道数（越少：浪越大、越有起伏）
   const SPEED = 0.22 //   每秒推进多少"道"：一道浪从地平线到脚下约 27 秒，每 ~4.5 秒来一道新的
   const scroll = t * 0.12 // 细碎纹理自身的极慢漂移
   const XSPREAD = 6.2
@@ -161,7 +161,7 @@ export function drawWater(ctx, view, field) {
     const wz = zc - scroll
     const phaseBase = d * LAYERS - t * SPEED
     // 涌浪振幅随深度变大（近处高），远处收得很小，免得地平线附近糊成一片
-    const swellAmp = 0.16 + 0.30 * d
+    const swellAmp = 0.34 + 0.62 * d
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD
       // 相位扭曲：让浪脊是弧形/被绊住，而不是一条笔直的横线
@@ -170,7 +170,7 @@ export function drawWater(ctx, view, field) {
       const ridge = fbmRidged(wx * XFREQ + 3.0, wz * WFREQ)
       const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1)
       // 三段合成：涌浪层（大尺度、有方向）+ 碎浪脊（随机斑块）+ 细纹理
-      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.5 + (detail - 0.5) * 0.28
+      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.46 + (detail - 0.5) * 0.26
       heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h
       idx += 1
     }
@@ -187,7 +187,7 @@ export function drawWater(ctx, view, field) {
     const rBase = lerp(lerp(far[0], mid[0], nearness), deep[0], Math.max(0, d - 0.35) / 0.65)
     const gBase = lerp(lerp(far[1], mid[1], nearness), deep[1], Math.max(0, d - 0.35) / 0.65)
     const bBase = lerp(lerp(far[2], mid[2], nearness), deep[2], Math.max(0, d - 0.35) / 0.65)
-    const foamBand = clamp01((d - 0.78) / 0.22) * clamp01(0.45 + 0.45 * tideN)
+    const foamBand = clamp01((d - 0.62) / 0.38) * clamp01(0.45 + 0.45 * tideN)
     const rowLight = 0.5 + 0.5 * exposure
 
     for (let i = 0; i < bw; i += 1) {
@@ -198,12 +198,14 @@ export function drawWater(ctx, view, field) {
       // 明暗：坡度朝光的一侧亮、背光暗 —— 这是"块与块之间有立体感"的来源
       const tilt = -(hx * (bodyX - 0.5) * 4.4 + hz * 1.15)
       // 近处不要压成黑条：明暗增益随深度递减
-      const shade = clamp01(0.64 + tilt * (2.2 - 0.9 * d))
+      const shade = clamp01(0.58 + tilt * (3.1 - 1.1 * d))
       const crest = clamp01((h - 0.4) / 0.6)
 
-      let r = rBase * shade
-      let g = gBase * shade
-      let b = bBase * shade
+      // 波峰提亮 / 波谷压暗（按高度，不只看斜率）——这是"起伏感"最直接的来源
+      const relief = 0.78 + 0.40 * (h - 0.5) * 2
+      let r = rBase * shade * relief
+      let g = gBase * shade * relief
+      let b = bBase * shade * relief
 
       // 天际反射（雾感）
       r = lerp(r, sky[0], haze * 0.62)
@@ -211,10 +213,10 @@ export function drawWater(ctx, view, field) {
       b = lerp(b, sky[2], haze * 0.62)
 
       // 浪脊亮边：只有"高且坡对"的碎块才亮，不是整条线
-      const crestLight = crest * crest * clamp01(0.25 + tilt * 2.2) * rowLight
-      r += glow[0] * crestLight * 0.3
-      g += glow[1] * crestLight * 0.3
-      b += glow[2] * crestLight * 0.28
+      const crestLight = crest * crest * clamp01(0.3 + tilt * 2.6) * rowLight
+      r += glow[0] * crestLight * 0.46
+      g += glow[1] * crestLight * 0.46
+      b += glow[2] * crestLight * 0.42
 
       // 镜面碎光
       const spec = Math.pow(clamp01(0.26 - tilt * 1.35), 5) * crest * bodyAlpha
@@ -226,9 +228,9 @@ export function drawWater(ctx, view, field) {
 
       // 白沫：只在近处、只在最高的那批碎块上，斑块状
       if (foamBand > 0.01) {
-        const mask = clamp01((h - (0.72 - 0.1 * foamBand)) / 0.24) * foamBand
+        const mask = clamp01((h - (0.66 - 0.12 * foamBand)) / 0.26) * foamBand
         if (mask > 0.01) {
-          const a = mask * 0.32
+          const a = mask * 0.42
           r = lerp(r, foam[0], a)
           g = lerp(g, foam[1], a)
           b = lerp(b, foam[2], a)

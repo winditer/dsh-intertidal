@@ -407,7 +407,7 @@ function drawWater(ctx, view, field2) {
   const bodyColor = hexToRgb(body?.color ?? pal.horizonGlow ?? "#fff6e2");
   const bodyAlpha = body ? clamp012(body.alpha ?? 0.8) : 0.35;
   const heights = field2.h;
-  const LAYERS = 6;
+  const LAYERS = 5;
   const SPEED = 0.22;
   const scroll = t * 0.12;
   const XSPREAD = 6.2;
@@ -419,14 +419,14 @@ function drawWater(ctx, view, field2) {
     const zc = 1 / (0.38 + d * 2.4);
     const wz = zc - scroll;
     const phaseBase = d * LAYERS - t * SPEED;
-    const swellAmp = 0.16 + 0.3 * d;
+    const swellAmp = 0.34 + 0.62 * d;
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD;
       const wobble = (vnoise(wx * 0.85 + 9.7, wz * 0.55 + 3.3) - 0.5) * 0.62;
       const swell = Math.sin((phaseBase + wobble) * TAU);
       const ridge = fbmRidged(wx * XFREQ + 3, wz * WFREQ);
       const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1);
-      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.5 + (detail - 0.5) * 0.28;
+      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.46 + (detail - 0.5) * 0.26;
       heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h;
       idx += 1;
     }
@@ -440,25 +440,26 @@ function drawWater(ctx, view, field2) {
     const rBase = lerp(lerp(far[0], mid[0], nearness), deep[0], Math.max(0, d - 0.35) / 0.65);
     const gBase = lerp(lerp(far[1], mid[1], nearness), deep[1], Math.max(0, d - 0.35) / 0.65);
     const bBase = lerp(lerp(far[2], mid[2], nearness), deep[2], Math.max(0, d - 0.35) / 0.65);
-    const foamBand = clamp012((d - 0.78) / 0.22) * clamp012(0.45 + 0.45 * tideN);
+    const foamBand = clamp012((d - 0.62) / 0.38) * clamp012(0.45 + 0.45 * tideN);
     const rowLight = 0.5 + 0.5 * exposure;
     for (let i = 0; i < bw; i += 1) {
       const h = heights[j * bw + i];
       const hx = (heights[j * bw + Math.min(bw - 1, i + 1)] - heights[j * bw + Math.max(0, i - 1)]) * 0.5;
       const hz = (heights[Math.min(bh - 1, j + 1) * bw + i] - heights[Math.max(0, j - 1) * bw + i]) * 0.5;
       const tilt = -(hx * (bodyX - 0.5) * 4.4 + hz * 1.15);
-      const shade = clamp012(0.64 + tilt * (2.2 - 0.9 * d));
+      const shade = clamp012(0.58 + tilt * (3.1 - 1.1 * d));
       const crest = clamp012((h - 0.4) / 0.6);
-      let r = rBase * shade;
-      let g = gBase * shade;
-      let b = bBase * shade;
+      const relief = 0.78 + 0.4 * (h - 0.5) * 2;
+      let r = rBase * shade * relief;
+      let g = gBase * shade * relief;
+      let b = bBase * shade * relief;
       r = lerp(r, sky[0], haze * 0.62);
       g = lerp(g, sky[1], haze * 0.62);
       b = lerp(b, sky[2], haze * 0.62);
-      const crestLight = crest * crest * clamp012(0.25 + tilt * 2.2) * rowLight;
-      r += glow[0] * crestLight * 0.3;
-      g += glow[1] * crestLight * 0.3;
-      b += glow[2] * crestLight * 0.28;
+      const crestLight = crest * crest * clamp012(0.3 + tilt * 2.6) * rowLight;
+      r += glow[0] * crestLight * 0.46;
+      g += glow[1] * crestLight * 0.46;
+      b += glow[2] * crestLight * 0.42;
       const spec = Math.pow(clamp012(0.26 - tilt * 1.35), 5) * crest * bodyAlpha;
       if (spec > 4e-3) {
         r += bodyColor[0] * spec * 1.35;
@@ -466,9 +467,9 @@ function drawWater(ctx, view, field2) {
         b += bodyColor[2] * spec * 1.35;
       }
       if (foamBand > 0.01) {
-        const mask = clamp012((h - (0.72 - 0.1 * foamBand)) / 0.24) * foamBand;
+        const mask = clamp012((h - (0.66 - 0.12 * foamBand)) / 0.26) * foamBand;
         if (mask > 0.01) {
-          const a = mask * 0.32;
+          const a = mask * 0.42;
           r = lerp(r, foam[0], a);
           g = lerp(g, foam[1], a);
           b = lerp(b, foam[2], a);
