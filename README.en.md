@@ -13,7 +13,7 @@ Every N minutes the screen is handed to the sea **as it is right now**, for thre
 ## What it does
 
 - **On a schedule** — 3 minutes every 120 minutes by default. It fades out on its own: no prompt, no residue, your draft and scroll position untouched.
-- **True to this moment** — the phase comes from **solar altitude**, not clock time (Shanghai may be at dusk while Reykjavik is still in the afternoon); the moon is drawn from a 29.53-day synodic approximation; stars at night; polar day/night handled separately.
+- **True to this moment** — the phase comes from **solar altitude**, not clock time (Shanghai may be at dusk while Reykjavik is still in the afternoon); the moon is drawn from a 29.53-day synodic approximation and there is always one at night; by day, small flocks of gulls cross the sky (random appearances, not a looping animation); polar day/night handled separately.
 - **Two kinds of sea**:
   - procedural — five palettes plus a perspective noise field: randomly distributed water patches that grow toward the viewer, with sun glitter and near-field whitecaps (the fallback);
   - media — a random image/video from a folder you choose, or a web/image link that is fetched once and cached, then graded to match the current light.

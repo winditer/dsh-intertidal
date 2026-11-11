@@ -297,7 +297,18 @@ function computePalette(now) {
   if (sunAltitude !== null) stars *= clamp01((-sunAltitude + 1) / 7);
   else if ((phase || FALLBACK_PHASE) !== "night") stars = 0;
   const sun = sunOf(sunPosition, colors);
-  const moon = moonOf(bodyPosition(source.moon), colors, moonPhase);
+  let moon = moonOf(bodyPosition(source.moon), colors, moonPhase);
+  const nightish = sunAltitude !== null ? sunAltitude < -6 : (phase || FALLBACK_PHASE) === "night";
+  if (!moon && nightish) {
+    const lit = illuminatedFraction(moonPhase);
+    moon = {
+      x: 0.62,
+      y: 0.2,
+      color: colors.moonColor,
+      alpha: round(clamp01(0.4 + 0.55 * lit), 3),
+      phase: moonPhase
+    };
+  }
   return {
     skyTop: colors.skyTop,
     skyMid: colors.skyMid,
@@ -419,14 +430,18 @@ function drawWater(ctx, view, field2) {
     const zc = 1 / (0.38 + d * 2.4);
     const wz = zc - scroll;
     const phaseBase = d * LAYERS - t * SPEED;
-    const swellAmp = 0.34 + 0.62 * d;
+    const swellAmp = 0.3 + 0.52 * d;
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD;
       const wobble = (vnoise(wx * 0.85 + 9.7, wz * 0.55 + 3.3) - 0.5) * 0.62;
-      const swell = Math.sin((phaseBase + wobble) * TAU);
+      const s0 = Math.sin((phaseBase + wobble) * TAU);
+      const swell = (s0 < 0 ? -1 : 1) * Math.pow(Math.abs(s0), 1.55);
+      const s1 = Math.sin((d * 3.1 - t * 0.135 + wobble * 1.7 + 2.3) * TAU);
+      const swell2 = (s1 < 0 ? -1 : 1) * Math.pow(Math.abs(s1), 1.4);
       const ridge = fbmRidged(wx * XFREQ + 3, wz * WFREQ);
+      const chop = fbmRidged(wx * XFREQ * 2.6 + 17.3, wz * WFREQ * 1.5 + 8.9);
       const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1);
-      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.46 + (detail - 0.5) * 0.26;
+      const h = 0.5 + 0.5 * swell * swellAmp + 0.5 * swell2 * swellAmp * 0.42 + (ridge - 0.5) * 0.54 + (chop - 0.5) * 0.44 * d + (detail - 0.5) * 0.22;
       heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h;
       idx += 1;
     }
@@ -466,10 +481,11 @@ function drawWater(ctx, view, field2) {
         g += bodyColor[1] * spec * 1.35;
         b += bodyColor[2] * spec * 1.35;
       }
-      if (foamBand > 0.01) {
-        const mask = clamp012((h - (0.66 - 0.12 * foamBand)) / 0.26) * foamBand;
+      const streakBand = clamp012((d - 0.42) / 0.58);
+      if (streakBand > 0.01) {
+        const mask = clamp012((h - (0.68 - 0.16 * streakBand)) / 0.24) * streakBand;
         if (mask > 0.01) {
-          const a = mask * 0.42;
+          const a = mask * (0.18 + 0.3 * clamp012(foamBand * 2));
           r = lerp(r, foam[0], a);
           g = lerp(g, foam[1], a);
           b = lerp(b, foam[2], a);
@@ -509,7 +525,7 @@ function drawWater(ctx, view, field2) {
 function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, glow }) {
   const waterH = H - horizonY;
   if (waterH <= 2) return;
-  const count = Math.round((40 + 150 * exposure) * clamp012(bodyAlpha + 0.2));
+  const count = Math.round((70 + 240 * exposure) * clamp012(bodyAlpha + 0.2));
   const sunU = bodyX;
   ctx.save();
   for (let n = 0; n < count; n += 1) {
@@ -518,13 +534,13 @@ function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, 
     const seedC = hash2(n * 7 + 3, 19);
     const d = Math.pow(seedA, 0.72);
     const y = horizonY + d * waterH;
-    const spread = 0.18 + 0.34 * d;
+    const spread = 0.1 + 0.3 * d;
     const x = (sunU + (seedB - 0.5) * 2 * spread) * W;
     if (x < 0 || x > W) continue;
     const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (0.45 + seedC * 1.1) + seedC * TAU));
-    const alpha = twinkle * (0.12 + 0.34 * exposure) * clamp012(1 - Math.abs(seedB - 0.5) * 1.9);
+    const alpha = twinkle * (0.14 + 0.42 * exposure) * clamp012(1 - Math.abs(seedB - 0.5) * 1.25);
     if (alpha < 0.03) continue;
-    const len = 1 + 1.6 * d + seedC;
+    const len = 1 + 1.9 * d + seedC * 1.2;
     ctx.fillStyle = `rgba(${glow[0] | 0},${glow[1] | 0},${glow[2] | 0},${alpha.toFixed(3)})`;
     ctx.fillRect(x, y, len, 1);
   }
@@ -532,9 +548,85 @@ function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, 
 }
 var WATER_CONSTANTS = Object.freeze({ BUFFER_W, MAX_BUFFER_H, MIN_BUFFER_H, TAU });
 
+// src/client/birds.js
+var TAU2 = Math.PI * 2;
+var clamp013 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+function hash(n) {
+  let x = Math.imul(n | 0, 2654435761);
+  x = Math.imul(x ^ x >>> 15, 2246822507);
+  return ((x ^ x >>> 13) >>> 0) / 4294967296;
+}
+var BIRD_CONSTANTS = Object.freeze({
+  slots: 9,
+  //        同时在"档期"里的鸟槽（不是同屏数量）
+  minPeriod: 19,
+  //   最短的一个轮回（秒）
+  periodSpan: 23,
+  //  周期跨度：每只鸟都不同，避免同拍
+  minFlight: 7,
+  //    飞过一整屏需要的秒数（下界）
+  flightSpan: 5
+});
+function daylightOf(pal) {
+  if (!pal || typeof pal !== "object") return 0;
+  if (!Number.isFinite(pal.exposure)) return 0;
+  const stars = Number.isFinite(pal.stars) ? pal.stars : 0;
+  return clamp013((pal.exposure - 0.45) / 0.4) * clamp013(1 - stars * 1.6);
+}
+function drawBirds(ctx, view) {
+  const { W, H, horizonY, t } = view;
+  const pal = view.pal ?? {};
+  const daylight = daylightOf(pal);
+  if (daylight <= 0.02) return 0;
+  if (!Number.isFinite(W) || !Number.isFinite(H) || !Number.isFinite(horizonY)) return 0;
+  if (horizonY <= 4 || !ctx || typeof ctx.beginPath !== "function") return 0;
+  const { slots, minPeriod, periodSpan, minFlight, flightSpan } = BIRD_CONSTANTS;
+  const skyH = horizonY;
+  const scale = Math.max(0.55, Math.min(2.2, H / 720));
+  const density = 0.55 + 0.45 * daylight;
+  let drawn = 0;
+  for (let i = 0; i < slots; i += 1) {
+    const period = minPeriod + hash(i * 3 + 1) * periodSpan;
+    const flight = minFlight + hash(i * 7 + 5) * flightSpan;
+    const offset = hash(i * 11 + 2) * period;
+    const local = (t + offset) % period;
+    if (local > flight) continue;
+    if (hash(i * 13 + 9) > density) continue;
+    const p = local / flight;
+    const r1 = hash(i * 17 + 3);
+    const r2 = hash(i * 19 + 11);
+    const r3 = hash(i * 23 + 7);
+    const leftToRight = r1 > 0.45;
+    const x0 = leftToRight ? -0.08 * W : 1.08 * W;
+    const x1 = leftToRight ? 1.08 * W : -0.08 * W;
+    const x = x0 + (x1 - x0) * p;
+    const depth = 0.28 + 0.42 * r2;
+    const bob = Math.sin((p * 2 + r3) * TAU2) * skyH * 0.012;
+    const y = horizonY * depth + bob;
+    const size = (11 + 9 * r3) * scale * (0.55 + 0.6 * depth);
+    const flaps = 6 + Math.floor(r3 * 5);
+    const wing = Math.sin(p * flaps * TAU2 + r2 * TAU2);
+    const lift = 0.55 + 0.45 * Math.abs(wing);
+    const alpha = clamp013((0.5 + 0.32 * daylight) * (0.7 + 0.3 * Math.sin(p * Math.PI)));
+    ctx.save();
+    ctx.strokeStyle = `rgba(28,34,44,${alpha.toFixed(3)})`;
+    ctx.lineWidth = Math.max(1.1, 1.7 * scale);
+    ctx.lineCap = "round";
+    if (typeof ctx.beginPath === "function") {
+      ctx.beginPath();
+      ctx.moveTo(x - size, y - wing * size * 0.55 * lift);
+      ctx.quadraticCurveTo(x - size * 0.35, y - size * 0.28 - wing * size * 0.35 * lift, x, y);
+      ctx.quadraticCurveTo(x + size * 0.35, y - size * 0.28 - wing * size * 0.35 * lift, x + size, y - wing * size * 0.55 * lift);
+      ctx.stroke();
+    }
+    drawn += 1;
+  }
+  return drawn;
+}
+
 // src/client/sea-canvas.jsx
 var import_jsx_runtime = require("react/jsx-runtime");
-var TAU2 = Math.PI * 2;
+var TAU3 = Math.PI * 2;
 var TUNING = Object.freeze({
   maxBufferWidth: 1280,
   //       内部渲染缓冲宽度上限（程序化海）
@@ -602,7 +694,7 @@ function num2(value, fallback) {
 function clamp2(value, lo, hi) {
   return value < lo ? lo : value > hi ? hi : value;
 }
-function clamp013(value) {
+function clamp014(value) {
   return clamp2(num2(value, 0), 0, 1);
 }
 function lerp2(a, b, k) {
@@ -624,7 +716,7 @@ function rgba(color, alpha) {
     g = parseInt(hex.slice(2, 4), 16) || 0;
     b = parseInt(hex.slice(4, 6), 16) || 0;
   }
-  return "rgba(" + r + "," + g + "," + b + "," + round2(clamp013(alpha), 3) + ")";
+  return "rgba(" + r + "," + g + "," + b + "," + round2(clamp014(alpha), 3) + ")";
 }
 function hash1(n) {
   const s = Math.sin(n * 12.9898) * 43758.5453;
@@ -638,7 +730,7 @@ function drawSky(ctx, W, H, horizonY, pal) {
   gradient.addColorStop(1, pal.skyBottom);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, W, height);
-  const spread = H * (0.09 + 0.07 * (1 - clamp013(pal.exposure)));
+  const spread = H * (0.09 + 0.07 * (1 - clamp014(pal.exposure)));
   const glow = ctx.createLinearGradient(0, horizonY - spread, 0, horizonY + H * 4e-3);
   glow.addColorStop(0, rgba(pal.horizonGlow, 0));
   glow.addColorStop(0.72, rgba(pal.horizonGlow, 0.3));
@@ -650,7 +742,7 @@ function drawSky(ctx, W, H, horizonY, pal) {
   ctx.fillRect(0, hazeTop, W, horizonY - hazeTop);
 }
 function drawStars(ctx, W, H, horizonY, pal, t) {
-  const density = clamp013(pal.stars);
+  const density = clamp014(pal.stars);
   if (density <= 0.01) return;
   const count = Math.round(density * 120);
   const tint = mix(pal.foam, "#ffffff", 0.65);
@@ -662,14 +754,14 @@ function drawStars(ctx, W, H, horizonY, pal, t) {
     const y = hy * hy * ceiling;
     const size = 0.7 + hash1(i * 3.77) * 1.1;
     const twinkle = 0.55 + 0.45 * Math.sin(t * (0.6 + hx * 1.9) + i * 1.3);
-    ctx.fillStyle = rgba(tint, clamp013(density * twinkle) * 0.85);
+    ctx.fillStyle = rgba(tint, clamp014(density * twinkle) * 0.85);
     ctx.fillRect(x, y, size, size);
   }
 }
 function drawSun(ctx, W, H, pal) {
   const sun = pal.sun;
   if (!sun) return;
-  const alpha = clamp013(sun.alpha);
+  const alpha = clamp014(sun.alpha);
   if (alpha <= 0.02) return;
   const cx = clamp2(sun.x, -0.2, 1.2) * W;
   const cy = clamp2(sun.y, -0.2, 1.2) * H;
@@ -680,7 +772,7 @@ function drawSun(ctx, W, H, pal) {
   halo.addColorStop(1, rgba(pal.horizonGlow, 0));
   ctx.fillStyle = halo;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius * 7, 0, TAU2);
+  ctx.arc(cx, cy, radius * 7, 0, TAU3);
   ctx.fill();
   const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
   core.addColorStop(0, rgba(sun.color, alpha));
@@ -688,29 +780,29 @@ function drawSun(ctx, W, H, pal) {
   core.addColorStop(1, rgba(sun.color, alpha * 0.5));
   ctx.fillStyle = core;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, TAU2);
+  ctx.arc(cx, cy, radius, 0, TAU3);
   ctx.fill();
 }
 function drawMoon(ctx, W, H, pal) {
   const moon = pal.moon;
   if (!moon) return;
-  const alpha = clamp013(moon.alpha);
+  const alpha = clamp014(moon.alpha);
   if (alpha <= 0.02) return;
   const cx = clamp2(moon.x, -0.2, 1.2) * W;
   const cy = clamp2(moon.y, -0.2, 1.2) * H;
   const radius = Math.max(5, H * 0.019);
-  const phase = clamp013(num2(moon.phase, 0.5));
+  const phase = clamp014(num2(moon.phase, 0.5));
   const halo = ctx.createRadialGradient(cx, cy, radius * 0.6, cx, cy, radius * 6);
   halo.addColorStop(0, rgba(moon.color, 0.26 * alpha));
   halo.addColorStop(0.4, rgba(moon.color, 0.08 * alpha));
   halo.addColorStop(1, rgba(moon.color, 0));
   ctx.fillStyle = halo;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius * 6, 0, TAU2);
+  ctx.arc(cx, cy, radius * 6, 0, TAU3);
   ctx.fill();
   const waxing = phase < 0.5;
   const p = waxing ? phase : 1 - phase;
-  const rx = Math.max(0.01, radius * Math.abs(Math.cos(TAU2 * p)));
+  const rx = Math.max(0.01, radius * Math.abs(Math.cos(TAU3 * p)));
   ctx.save();
   if (!waxing) {
     ctx.translate(cx * 2, 0);
@@ -730,13 +822,13 @@ function drawMoon(ctx, W, H, pal) {
   ctx.restore();
 }
 function farSeaNoise(u, t) {
-  const w = TAU2 * L1.freq;
+  const w = TAU3 * L1.freq;
   return Math.sin(u * L1.spatial + t * w) * 0.5 + Math.sin(u * L1.spatial * 2.6 - t * w * 1.7 + 1.1) * 0.3 + Math.sin(u * L1.spatial * 5.4 + t * w * 2.9 + 2.3) * 0.2;
 }
 function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
-  const amp = lerp2(L1.ampMin, L1.ampMax, 0.5 + 0.5 * Math.sin(t * TAU2 * L1.freq)) * px;
+  const amp = lerp2(L1.ampMin, L1.ampMax, 0.5 + 0.5 * Math.sin(t * TAU3 * L1.freq)) * px;
   const step = Math.max(8, W / 80);
-  const curve = (x) => horizonY - amp * (0.5 + 0.5 * farSeaNoise(x / Math.max(1, W) * TAU2, t));
+  const curve = (x) => horizonY - amp * (0.5 + 0.5 * farSeaNoise(x / Math.max(1, W) * TAU3, t));
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(0, curve(0));
@@ -749,7 +841,7 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
   ctx.closePath();
   ctx.clip();
   const gradient = ctx.createLinearGradient(0, horizonY - amp - 2, 0, H);
-  const mirror = 0.45 + 0.25 * (1 - clamp013(pal.exposure));
+  const mirror = 0.45 + 0.25 * (1 - clamp014(pal.exposure));
   gradient.addColorStop(0, mix(pal.seaFar, pal.skyBottom, mirror));
   gradient.addColorStop(0.18, mix(pal.seaFar, pal.skyBottom, mirror * 0.45));
   gradient.addColorStop(0.42, mix(pal.seaFar, pal.seaMid, 0.85));
@@ -758,8 +850,8 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, horizonY - amp - 2, W, H - horizonY + amp + 4);
   ctx.restore();
-  const fogAmount = clamp013(0.3 + 0.5 * (1 - clamp013(pal.exposure)));
-  const fogHeight = H * (0.045 + 0.085 * (1 - clamp013(pal.exposure)));
+  const fogAmount = clamp014(0.3 + 0.5 * (1 - clamp014(pal.exposure)));
+  const fogHeight = H * (0.045 + 0.085 * (1 - clamp014(pal.exposure)));
   const fogColor = mix(pal.skyBottom, pal.horizonGlow, 0.45);
   const fog = ctx.createLinearGradient(0, horizonY - fogHeight * 0.45, 0, horizonY + fogHeight * 0.9);
   fog.addColorStop(0, rgba(fogColor, 0));
@@ -774,19 +866,19 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
     const xx = Math.min(x, W);
     ctx.lineTo(xx, curve(xx));
   }
-  ctx.strokeStyle = rgba(mix(pal.seaFar, pal.foam, 0.3), 0.06 + 0.16 * clamp013(pal.exposure));
+  ctx.strokeStyle = rgba(mix(pal.seaFar, pal.foam, 0.3), 0.06 + 0.16 * clamp014(pal.exposure));
   ctx.lineWidth = Math.max(0.6, 1.1 * px);
   ctx.stroke();
 }
 function gradeOf(media) {
   if (!media || typeof media !== "object") return 0.55;
   const flat = media.grade !== void 0 ? media.grade : media.settings && media.settings.grade;
-  return clamp013(num2(flat, 0.55));
+  return clamp014(num2(flat, 0.55));
 }
 function motionOf(media) {
   if (!media || typeof media !== "object") return 0.5;
   const flat = media.motion !== void 0 ? media.motion : media.settings && media.settings.motion;
-  return clamp013(num2(flat, 0.5));
+  return clamp014(num2(flat, 0.5));
 }
 function hashString(text) {
   const source = typeof text === "string" ? text : "";
@@ -811,7 +903,7 @@ function withComposite(ctx, op, paint) {
   }
 }
 function compositeFill(ctx, op, color, alpha, W, H) {
-  const a = clamp013(alpha);
+  const a = clamp014(alpha);
   if (a <= 3e-3) return;
   withComposite(ctx, op, () => {
     ctx.fillStyle = rgba(color, a);
@@ -819,20 +911,20 @@ function compositeFill(ctx, op, color, alpha, W, H) {
   });
 }
 function drawMediaGrade(ctx, W, H, pal, grade) {
-  const g = clamp013(grade);
+  const g = clamp014(grade);
   if (g <= 0.01) return;
-  const exposure = clamp013(pal.exposure);
+  const exposure = clamp014(pal.exposure);
   const lowSun = 1 - exposure;
-  const darkness = clamp013((0.95 - exposure) / 0.65);
-  const tint = mix(pal.seaMid, pal.horizonGlow, clamp013(0.2 + 0.75 * lowSun));
-  const shade = mix(tint, "#03060e", clamp013(0.4 + 0.55 * darkness));
-  compositeFill(ctx, "multiply", shade, clamp013(g * (0.08 + 0.9 * darkness)), W, H);
-  if (darkness > 0.2) compositeFill(ctx, "multiply", "#04070f", clamp013(g * 0.4 * (darkness - 0.2) / 0.8), W, H);
-  compositeFill(ctx, "screen", mix(pal.horizonGlow, "#ffffff", 0.5), clamp013(g * (0.1 + 0.16 * exposure)), W, H);
-  compositeFill(ctx, "soft-light", tint, clamp013(g * 0.55), W, H);
+  const darkness = clamp014((0.95 - exposure) / 0.65);
+  const tint = mix(pal.seaMid, pal.horizonGlow, clamp014(0.2 + 0.75 * lowSun));
+  const shade = mix(tint, "#03060e", clamp014(0.4 + 0.55 * darkness));
+  compositeFill(ctx, "multiply", shade, clamp014(g * (0.08 + 0.9 * darkness)), W, H);
+  if (darkness > 0.2) compositeFill(ctx, "multiply", "#04070f", clamp014(g * 0.4 * (darkness - 0.2) / 0.8), W, H);
+  compositeFill(ctx, "screen", mix(pal.horizonGlow, "#ffffff", 0.5), clamp014(g * (0.1 + 0.16 * exposure)), W, H);
+  compositeFill(ctx, "soft-light", tint, clamp014(g * 0.55), W, H);
 }
 function drawMediaSkyMask(ctx, W, H, pal, grade) {
-  const g = clamp013(grade);
+  const g = clamp014(grade);
   if (g <= 0.01) return;
   const bottom = H * MEDIA.skyMaskBottom;
   const shade = ctx.createLinearGradient(0, 0, 0, bottom);
@@ -855,7 +947,7 @@ function drawMediaSweep(ctx, W, H, pal, t, motion, grade) {
   const bandHeight = H * MEDIA.sweepHeight;
   const y = -bandHeight + phase * (H + bandHeight * 2);
   const strength = Math.sin(Math.PI * phase);
-  const alpha = 0.05 * strength * (0.45 + 0.75 * clamp013(grade)) * (0.5 + 0.5 * clamp013(motion));
+  const alpha = 0.05 * strength * (0.45 + 0.75 * clamp014(grade)) * (0.5 + 0.5 * clamp014(motion));
   if (alpha <= 4e-3) return;
   const sweep = ctx.createLinearGradient(0, y, 0, y + bandHeight);
   sweep.addColorStop(0, rgba(pal.foam, 0));
@@ -867,7 +959,7 @@ function drawMediaSweep(ctx, W, H, pal, t, motion, grade) {
   });
 }
 function drawVignette(ctx, W, H, strength) {
-  const s = clamp013(strength);
+  const s = clamp014(strength);
   if (s <= 0.01) return;
   const gradient = ctx.createRadialGradient(W * 0.5, H * 0.46, Math.min(W, H) * 0.34, W * 0.5, H * 0.5, Math.max(W, H) * 0.78);
   gradient.addColorStop(0, "rgba(0,0,0,0)");
@@ -891,18 +983,18 @@ function renderMediaScene(ctx, W, H, t, pal, asset, media, warmth) {
   if (!iw || !ih) return false;
   const motion = motionOf(media);
   const grade = gradeOf(media);
-  const seed = clamp013(num2(asset.seed, 0));
+  const seed = clamp014(num2(asset.seed, 0));
   const phase = ((t / MEDIA.kenBurnsPeriod + seed) % 1 + 1) % 1;
-  const ease = 0.5 - 0.5 * Math.cos(TAU2 * phase);
+  const ease = 0.5 - 0.5 * Math.cos(TAU3 * phase);
   const zoom = MEDIA.overscan + MEDIA.kenBurnsZoom * motion * (0.35 + 0.65 * ease);
   const scale = Math.max(W / iw, H / ih) * zoom;
   const dw = Math.max(W + 2, iw * scale);
   const dh = Math.max(H + 2, ih * scale);
   const marginX = Math.max(0, (dw - W) / 2);
   const marginY = Math.max(0, (dh - H) / 2);
-  const panX = marginX * 0.8 * motion * Math.sin(TAU2 * phase + seed * TAU2);
-  const panY = marginY * 0.5 * motion * Math.cos(TAU2 * phase * 0.71 + seed * 5.1);
-  const breath = motion > 0.02 ? Math.sin(TAU2 * MEDIA.breathFreq * t) * MEDIA.breathPx * (0.4 + 0.6 * motion) : 0;
+  const panX = marginX * 0.8 * motion * Math.sin(TAU3 * phase + seed * TAU3);
+  const panY = marginY * 0.5 * motion * Math.cos(TAU3 * phase * 0.71 + seed * 5.1);
+  const breath = motion > 0.02 ? Math.sin(TAU3 * MEDIA.breathFreq * t) * MEDIA.breathPx * (0.4 + 0.6 * motion) : 0;
   const dx = (W - dw) / 2 + clamp2(panX + breath, -marginX, marginX);
   const dy = (H - dh) / 2 + clamp2(panY, -marginY, marginY);
   ctx.drawImage(el, dx, dy, dw, dh);
@@ -944,6 +1036,12 @@ function renderScene(ctx, W, H, t, pal, tideN, warmth, field2) {
   drawStars(ctx, W, H, horizonY, pal, t);
   drawSun(ctx, W, H, pal);
   drawMoon(ctx, W, H, pal);
+  if (daylightOf(pal) > 0.02) {
+    try {
+      drawBirds(ctx, { W, H, horizonY, t, pal });
+    } catch (_error) {
+    }
+  }
   let drawn = false;
   if (field2) {
     try {

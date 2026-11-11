@@ -340,7 +340,22 @@ function computePalette(now) {
   else if ((phase || FALLBACK_PHASE) !== 'night') stars = 0;
 
   const sun = sunOf(sunPosition, colors);
-  const moon = moonOf(bodyPosition(source.moon), colors, moonPhase);
+  let moon = moonOf(bodyPosition(source.moon), colors, moonPhase);
+
+  // 夜里一定要有月亮：真实天象里月亮完全可能整夜在地平线下，但"夜里抬头就该看见月亮"是
+  // 产品的取舍（用户明确要求）。所以夜间且真实月亮不可见时，按同一月相画一轮在天上，
+  // 位置和亮度都取保守值 —— 月相仍然来自宿主的朔望周期计算，不是随机数。
+  const nightish = sunAltitude !== null ? sunAltitude < -6 : (phase || FALLBACK_PHASE) === 'night';
+  if (!moon && nightish) {
+    const lit = illuminatedFraction(moonPhase);
+    moon = {
+      x: 0.62,
+      y: 0.2,
+      color: colors.moonColor,
+      alpha: round(clamp01(0.4 + 0.55 * lit), 3),
+      phase: moonPhase,
+    };
+  }
 
   return {
     skyTop: colors.skyTop,

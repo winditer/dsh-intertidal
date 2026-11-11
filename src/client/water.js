@@ -161,16 +161,29 @@ export function drawWater(ctx, view, field) {
     const wz = zc - scroll
     const phaseBase = d * LAYERS - t * SPEED
     // 涌浪振幅随深度变大（近处高），远处收得很小，免得地平线附近糊成一片
-    const swellAmp = 0.34 + 0.62 * d
+    const swellAmp = 0.30 + 0.52 * d
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD
       // 相位扭曲：让浪脊是弧形/被绊住，而不是一条笔直的横线
       const wobble = (vnoise(wx * 0.85 + 9.7, wz * 0.55 + 3.3) - 0.5) * 0.62
-      const swell = Math.sin((phaseBase + wobble) * TAU)
+      // 主涌浪：sin 再做一个"上尖下缓"的形变（真实海浪的波峰比波谷窄、陡）
+      const s0 = Math.sin((phaseBase + wobble) * TAU)
+      const swell = (s0 < 0 ? -1 : 1) * Math.pow(Math.abs(s0), 1.55)
+      // 第二道涌浪：道数、速度、相位都与主涌浪不同 —— 两者叠加才会互相"打断"，
+      // 避免出现等间距的规则浪列（这是"一眼假"的主要来源之一）
+      const s1 = Math.sin((d * 3.1 - t * 0.135 + wobble * 1.7 + 2.3) * TAU)
+      const swell2 = (s1 < 0 ? -1 : 1) * Math.pow(Math.abs(s1), 1.4)
       const ridge = fbmRidged(wx * XFREQ + 3.0, wz * WFREQ)
+      // 近处再叠一层更高频的碎浪（远处的会被透视压成糊，所以按深度加权）
+      const chop = fbmRidged(wx * XFREQ * 2.6 + 17.3, wz * WFREQ * 1.5 + 8.9)
       const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1)
-      // 三段合成：涌浪层（大尺度、有方向）+ 碎浪脊（随机斑块）+ 细纹理
-      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.46 + (detail - 0.5) * 0.26
+      const h =
+        0.5 +
+        0.5 * swell * swellAmp +
+        0.5 * swell2 * swellAmp * 0.42 +
+        (ridge - 0.5) * 0.54 +
+        (chop - 0.5) * 0.44 * d +
+        (detail - 0.5) * 0.22
       heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h
       idx += 1
     }
@@ -227,10 +240,12 @@ export function drawWater(ctx, view, field) {
       }
 
       // 白沫：只在近处、只在最高的那批碎块上，斑块状
-      if (foamBand > 0.01) {
-        const mask = clamp01((h - (0.66 - 0.12 * foamBand)) / 0.26) * foamBand
+      // 浪脊白沫：近岸浓、中场淡（0.55 处就有一点点，像被风吹起的白边）
+      const streakBand = clamp01((d - 0.42) / 0.58)
+      if (streakBand > 0.01) {
+        const mask = clamp01((h - (0.68 - 0.16 * streakBand)) / 0.24) * streakBand
         if (mask > 0.01) {
-          const a = mask * 0.42
+          const a = mask * (0.18 + 0.3 * clamp01(foamBand * 2))
           r = lerp(r, foam[0], a)
           g = lerp(g, foam[1], a)
           b = lerp(b, foam[2], a)
@@ -287,7 +302,7 @@ export function drawWater(ctx, view, field) {
 function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, glow }) {
   const waterH = H - horizonY
   if (waterH <= 2) return
-  const count = Math.round((40 + 150 * exposure) * clamp01(bodyAlpha + 0.2))
+  const count = Math.round((70 + 240 * exposure) * clamp01(bodyAlpha + 0.2))
   const sunU = bodyX
   ctx.save()
   for (let n = 0; n < count; n += 1) {
@@ -297,13 +312,14 @@ function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, 
     // 越靠下（近处）越密，横向集中在天体附近（±0.28 屏宽）
     const d = Math.pow(seedA, 0.72) // 0 远 → 1 近
     const y = horizonY + d * waterH
-    const spread = 0.18 + 0.34 * d
+    // 横向收窄：碎光集中在天体正下方，连成一条"光路"（真实海面最显眼的线索之一）
+    const spread = 0.10 + 0.30 * d
     const x = (sunU + (seedB - 0.5) * 2 * spread) * W
     if (x < 0 || x > W) continue
     const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (0.45 + seedC * 1.1) + seedC * TAU))
-    const alpha = twinkle * (0.12 + 0.34 * exposure) * clamp01(1 - Math.abs(seedB - 0.5) * 1.9)
+    const alpha = twinkle * (0.14 + 0.42 * exposure) * clamp01(1 - Math.abs(seedB - 0.5) * 1.25)
     if (alpha < 0.03) continue
-    const len = 1 + 1.6 * d + seedC
+    const len = 1 + 1.9 * d + seedC * 1.2
     ctx.fillStyle = `rgba(${glow[0] | 0},${glow[1] | 0},${glow[2] | 0},${alpha.toFixed(3)})`
     ctx.fillRect(x, y, len, 1)
   }

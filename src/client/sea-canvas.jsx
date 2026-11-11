@@ -19,6 +19,7 @@
 import { useEffect, useRef } from 'react';
 import { paletteFor, mix } from './palette.js';
 import { createWaterField, drawWater } from './water.js';
+import { daylightOf, drawBirds } from './birds.js';
 
 const TAU = Math.PI * 2;
 
@@ -568,6 +569,15 @@ function renderScene(ctx, W, H, t, pal, tideN, warmth, field) {
   // 天体在海面之前画：地平线以下的部分自然被海水盖住
   drawSun(ctx, W, H, pal);
   drawMoon(ctx, W, H, pal);
+
+  // 白天的海鸥：只用时间函数决定航线，所以停帧/恢复不会"补飞"，掉帧也不会多出或少了鸟
+  if (daylightOf(pal) > 0.02) {
+    try {
+      drawBirds(ctx, { W, H, horizonY, t, pal });
+    } catch (_error) {
+      /* 鸟画不出来不影响海 */
+    }
+  }
 
   // 水面：**斑块场**（不是一排排浪脊）。
   // 低分辨率高度场按透视采样噪声 → 整块放大 → 随机的碎块、近大远小、无贯通全屏的条纹。
