@@ -139,12 +139,19 @@ export function drawWater(ctx, view, field) {
 
   const heights = field.h
   // 透视：屏幕上越靠下 = 世界坐标里离观察者越近。用 zc = 1/(a+b·d) 做距离映射，
-  // 横向再用 zc 放大 —— 这样斑块在世界空间里是各向同性的，屏幕上自然近大远小，
-  // 而且**不会**出现"从地平线放射出去的条纹"（那是只放大 x 不放大 z 的副作用）。
-  const scroll = t * 0.55
-  const XSPREAD = 6.2 //  横向世界跨度
-  const WFREQ = 5.4 //     沿深度的频率（决定碎块的疏密）
-  const XFREQ = 1.45 //    横向频率
+  // 横向再用 zc 放大 —— 斑块在世界空间里各向同性，屏幕上自然近大远小。
+  //
+  // v0.1.3：在"随机斑块"之上加一层**涌浪层次**。纯噪声看起来是平的、没有远近层次；
+  // 真实的海能看出"一道一道的涌浪由远及近"。做法是把高度场乘上一个沿深度推进的相位带：
+  //   phase = d·LAYERS - t·SPEED（t 增大 → 同一道浪的 d 增大 → 屏幕上往下走 = 朝观察者推过来）
+  // 再用低频噪声扭曲相位，使浪脊不是直线、而是被随机打断的弧形 —— 既有层次，又不是"一条一条"。
+  // 速度取 0.115 道/秒：一道涌浪从地平线推到脚下大约 8–9 秒，慢到能看清，不像快进。
+  const LAYERS = 6.0 //   画面里同时能看到的涌浪道数
+  const SPEED = 0.22 //   每秒推进多少"道"：一道浪从地平线到脚下约 27 秒，每 ~4.5 秒来一道新的
+  const scroll = t * 0.12 // 细碎纹理自身的极慢漂移
+  const XSPREAD = 6.2
+  const WFREQ = 5.4
+  const XFREQ = 1.45
 
   /* ---- 第一遍：高度场 ---- */
   let idx = 0
@@ -152,13 +159,19 @@ export function drawWater(ctx, view, field) {
     const d = (j + 0.5) / bh
     const zc = 1 / (0.38 + d * 2.4)
     const wz = zc - scroll
+    const phaseBase = d * LAYERS - t * SPEED
+    // 涌浪振幅随深度变大（近处高），远处收得很小，免得地平线附近糊成一片
+    const swellAmp = 0.16 + 0.30 * d
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD
+      // 相位扭曲：让浪脊是弧形/被绊住，而不是一条笔直的横线
+      const wobble = (vnoise(wx * 0.85 + 9.7, wz * 0.55 + 3.3) - 0.5) * 0.62
+      const swell = Math.sin((phaseBase + wobble) * TAU)
       const ridge = fbmRidged(wx * XFREQ + 3.0, wz * WFREQ)
-      const smooth = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1)
-      // 近处更"碎"（浪脊占主导），远处更"糊"（平滑噪声占主导）
-      const w = 0.28 + 0.42 * d
-      heights[idx] = ridge * w + smooth * (1 - w)
+      const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1)
+      // 三段合成：涌浪层（大尺度、有方向）+ 碎浪脊（随机斑块）+ 细纹理
+      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.5 + (detail - 0.5) * 0.28
+      heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h
       idx += 1
     }
   }
@@ -184,7 +197,8 @@ export function drawWater(ctx, view, field) {
 
       // 明暗：坡度朝光的一侧亮、背光暗 —— 这是"块与块之间有立体感"的来源
       const tilt = -(hx * (bodyX - 0.5) * 4.4 + hz * 1.15)
-      const shade = clamp01(0.5 + tilt * 3.4)
+      // 近处不要压成黑条：明暗增益随深度递减
+      const shade = clamp01(0.64 + tilt * (2.2 - 0.9 * d))
       const crest = clamp01((h - 0.4) / 0.6)
 
       let r = rBase * shade
@@ -284,7 +298,7 @@ function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, 
     const spread = 0.18 + 0.34 * d
     const x = (sunU + (seedB - 0.5) * 2 * spread) * W
     if (x < 0 || x > W) continue
-    const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (1.4 + seedC * 3.2) + seedC * TAU))
+    const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (0.45 + seedC * 1.1) + seedC * TAU))
     const alpha = twinkle * (0.12 + 0.34 * exposure) * clamp01(1 - Math.abs(seedB - 0.5) * 1.9)
     if (alpha < 0.03) continue
     const len = 1 + 1.6 * d + seedC

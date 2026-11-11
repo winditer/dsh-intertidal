@@ -407,7 +407,9 @@ function drawWater(ctx, view, field2) {
   const bodyColor = hexToRgb(body?.color ?? pal.horizonGlow ?? "#fff6e2");
   const bodyAlpha = body ? clamp012(body.alpha ?? 0.8) : 0.35;
   const heights = field2.h;
-  const scroll = t * 0.55;
+  const LAYERS = 6;
+  const SPEED = 0.22;
+  const scroll = t * 0.12;
   const XSPREAD = 6.2;
   const WFREQ = 5.4;
   const XFREQ = 1.45;
@@ -416,12 +418,16 @@ function drawWater(ctx, view, field2) {
     const d = (j + 0.5) / bh;
     const zc = 1 / (0.38 + d * 2.4);
     const wz = zc - scroll;
+    const phaseBase = d * LAYERS - t * SPEED;
+    const swellAmp = 0.16 + 0.3 * d;
     for (let i = 0; i < bw; i += 1) {
       const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD;
+      const wobble = (vnoise(wx * 0.85 + 9.7, wz * 0.55 + 3.3) - 0.5) * 0.62;
+      const swell = Math.sin((phaseBase + wobble) * TAU);
       const ridge = fbmRidged(wx * XFREQ + 3, wz * WFREQ);
-      const smooth = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1);
-      const w = 0.28 + 0.42 * d;
-      heights[idx] = ridge * w + smooth * (1 - w);
+      const detail = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1);
+      const h = 0.5 + 0.5 * swell * swellAmp + (ridge - 0.5) * 0.5 + (detail - 0.5) * 0.28;
+      heights[idx] = h < 0 ? 0 : h > 1 ? 1 : h;
       idx += 1;
     }
   }
@@ -441,7 +447,7 @@ function drawWater(ctx, view, field2) {
       const hx = (heights[j * bw + Math.min(bw - 1, i + 1)] - heights[j * bw + Math.max(0, i - 1)]) * 0.5;
       const hz = (heights[Math.min(bh - 1, j + 1) * bw + i] - heights[Math.max(0, j - 1) * bw + i]) * 0.5;
       const tilt = -(hx * (bodyX - 0.5) * 4.4 + hz * 1.15);
-      const shade = clamp012(0.5 + tilt * 3.4);
+      const shade = clamp012(0.64 + tilt * (2.2 - 0.9 * d));
       const crest = clamp012((h - 0.4) / 0.6);
       let r = rBase * shade;
       let g = gBase * shade;
@@ -514,7 +520,7 @@ function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, 
     const spread = 0.18 + 0.34 * d;
     const x = (sunU + (seedB - 0.5) * 2 * spread) * W;
     if (x < 0 || x > W) continue;
-    const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (1.4 + seedC * 3.2) + seedC * TAU));
+    const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (0.45 + seedC * 1.1) + seedC * TAU));
     const alpha = twinkle * (0.12 + 0.34 * exposure) * clamp012(1 - Math.abs(seedB - 0.5) * 1.9);
     if (alpha < 0.03) continue;
     const len = 1 + 1.6 * d + seedC;

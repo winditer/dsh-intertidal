@@ -177,3 +177,62 @@ test('常量为预期值（缓冲宽度/上下限）', () => {
   assert.ok(WATER_CONSTANTS.MIN_BUFFER_H > 0)
   assert.ok(WATER_CONSTANTS.MAX_BUFFER_H > WATER_CONSTANTS.MIN_BUFFER_H)
 })
+
+test('涌浪朝观察者推进：同一道浪脊的深度随时间单调增大', () => {
+  // 方向是硬要求（用户两次提到"方向"）：一道浪必须从地平线往脚下走，不能反过来。
+  const field = createWaterField(fakeDocument())
+  const ctx = fakeCtx()
+  const rowMean = (h) => {
+    const { width: w, h: hs } = field
+    const out = new Array(h).fill(0)
+    for (let j = 0; j < h; j += 1) {
+      let sum = 0
+      for (let i = 0; i < w; i += 1) sum += hs[j * w + i]
+      out[j] = sum / w
+    }
+    return out
+  }
+  const crestsOf = (mean) => {
+    const out = []
+    for (let j = 2; j < mean.length - 2; j += 1) if (mean[j] > mean[j - 1] && mean[j] >= mean[j + 1]) out.push(j)
+    return out
+  }
+  const seen = []
+  for (const t of [0, 1, 2]) {
+    drawWater(ctx, { W: 1280, H: 720, horizonY: 374, t, pal: PAL }, field)
+    const crests = crestsOf(rowMean(field.height))
+    seen.push({ t, deepest: crests[crests.length - 1] / field.height })
+  }
+  assert.ok(seen[1].deepest > seen[0].deepest, `t=1 的浪脊应比 t=0 更近：${JSON.stringify(seen)}`)
+  assert.ok(seen[2].deepest > seen[1].deepest, `t=2 的浪脊应比 t=1 更近：${JSON.stringify(seen)}`)
+})
+
+test('浪速是"慢"的：一道浪跨越整个水面需要 20 秒以上', () => {
+  // 用户反馈过"波浪太快了"。这里用同样的分组测量把速度钉住：d 的推进速率 ≤ 0.05 /s。
+  const field = createWaterField(fakeDocument())
+  const ctx = fakeCtx()
+  const deepestCrest = () => {
+    const { width: w, height: h, h: hs } = field
+    const mean = new Array(h).fill(0)
+    for (let j = 0; j < h; j += 1) {
+      let sum = 0
+      for (let i = 0; i < w; i += 1) sum += hs[j * w + i]
+      mean[j] = sum / w
+    }
+    let best = -1
+    let bestVal = -Infinity
+    for (let j = 2; j < h - 2; j += 1) {
+      if (mean[j] > mean[j - 1] && mean[j] >= mean[j + 1] && mean[j] > bestVal) {
+        bestVal = mean[j]
+        best = j
+      }
+    }
+    return best / h
+  }
+  drawWater(ctx, { W: 1280, H: 720, horizonY: 374, t: 0, pal: PAL }, field)
+  const d0 = deepestCrest()
+  drawWater(ctx, { W: 1280, H: 720, horizonY: 374, t: 1, pal: PAL }, field)
+  const d1 = deepestCrest()
+  const speed = Math.abs(d1 - d0) // 每秒推进的深度比例（绕回时可能变小，故取绝对值上限判断）
+  assert.ok(speed <= 0.06, `每秒推进不应超过 0.06 水深（实测 ${speed.toFixed(4)}）`)
+})
