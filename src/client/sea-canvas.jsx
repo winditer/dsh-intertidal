@@ -18,6 +18,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { paletteFor, mix } from './palette.js';
+import { createWaterField, drawWater } from './water.js';
 
 const TAU = Math.PI * 2;
 
@@ -44,18 +45,6 @@ const TUNING = Object.freeze({
 /** 画面几何与五层参数（spec §4.1）。 */
 const HORIZON = 0.52; //         地平线 y（与 palette.js 的坐标约定一致）
 
-/** L1 远海：一条低频起伏的地平线 —— 噪声 × 0.08Hz，振幅 2–4px。 */
-const L1 = Object.freeze({ freq: 0.08, ampMin: 2, ampMax: 4, spatial: 1.6 });
-
-/** L2 中景浪：三组正弦叠加的横向浪脊 —— 0.11/0.23/0.37Hz，相位差 1.7rad。 */
-const L2 = Object.freeze({
-  // 三组正弦：现在横向驱动每条波前的形状（波长随 depth 放大），
-  // 相位差 1.7rad 保留；契约里的 0.11/0.23/0.37Hz 由波前滚动 + 拍岸节奏承担
-  freqs: [0.11, 0.23, 0.37], //  Hz（三组基底频率，契约 §4.1）
-  phaseGap: 1.7, //              rad，相邻组相位差
-  weights: [0.55, 0.3, 0.15], //  波前高程里三组各占的权重
-  waves: [0.9, 1.6, 2.7], //      横向波数（× 2π）
-});
 
 /** L3 泡沫带：浪脊处阈值触发的白斑 —— 覆盖率 3%–9%。 */
 const L3 = Object.freeze({
@@ -131,22 +120,6 @@ function hash1(n) {
   return s - Math.floor(s);
 }
 
-/** 椭圆斑（兼容没有 ctx.ellipse 的实现）。 */
-function blob(ctx, x, y, rx, ry) {
-  const rw = Math.max(0.1, num(rx, 0.5));
-  const rh = Math.max(0.1, num(ry, 0.5));
-  ctx.beginPath();
-  if (typeof ctx.ellipse === 'function') {
-    ctx.ellipse(x, y, rw, rh, 0, 0, TAU);
-  } else {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.scale(rw, rh);
-    ctx.arc(0, 0, 1, 0, TAU);
-    ctx.restore();
-  }
-  ctx.fill();
-}
 
 /* ==========================================================================
  * L0 天空：垂直三分渐变 + 地平线辉光（随太阳高度角变化，颜色全来自 palette）
@@ -363,465 +336,6 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
  * （让浪形轻微起伏），幅度小到不产生横向漂移感。
  * ========================================================================== */
 
-const SURF = Object.freeze({
-  fronts: 10, //                 同屏波前条数（再多就成了铺瓦）
-  period: 5.4, //                秒：一条波前从地平线走到画面底部
-  depthPower: 2.15, //           y = horizon + (H - horizon)·depth^p（近处行距更大）
-  ampFar: 0.004, //              振幅（占海面高度比）——地平线附近几乎是平的
-  ampNear: 0.075, //             最靠前的浪
-  ampGuard: 0.55, //             振幅不超过「到下一条波前间距」的这个比例（防穿插）
-  waveGrow: 0.85, //             近处横向波数乘这个（波长随 depth 变大，但别长到看不出起伏）
-  overlap: 1.4, //               浪面的带高 = 到下一条波前间距 × 这个（>1 会重叠，近的盖住远的）
-  foamStep: 0.035, //            泡沫沿波前的采样步长（占画面宽）
-  foamSize: 5.6, //              泡沫斑块基准半高（px，1280 基准）
-  breakDepth: 0.78, //           超过它进入 breaking（= 画面下 22%）
-  tiltMax: 0.022, //             每条波前的低频倾斜幅度（占海面高度比，±）
-  phaseShell: 2.6, //            横向相位错开幅度（rad，±）—— 相邻浪脊不同步，必须接近一整个周期
-  grainPx: 2.0, //               地平线碎纹振幅（px）
-  grainDepth: 0.25, //           碎纹只加在 depth 小于它的区域（= 地平线附近 1/4 屏）
-  bandLight: 0.11, //            浪面内部的横向明暗幅度（互相遮蔽感）
-  foamAspect: 5.5, //            泡沫长宽比（横向至少 4:1，贴着浪脊拉长）
-  foamAlphaMax: 0.5, //          泡沫最大不透明度（太亮就像棉花）
-  foamVisible: 0.22, //          低于它就算「不明显」的底层白气
-});
-
-/** 画面 y 随 depth 的映射（透视压缩：地平线附近密、近处疏）。 */
-function depthToY(depth, H, horizonY) {
-  return horizonY + Math.max(0, H - horizonY) * Math.pow(clamp01(depth), SURF.depthPower);
-}
-
-/**
- * 当前这一帧的全部波前（按 y 从远到近排好）。
- * 每条：depth / y / amp / waveScale / phase / serial / breaking
- */
-function waveFronts(t, H, horizonY) {
-  const scroll = t / SURF.period;
-  const span = Math.max(1, H - horizonY);
-  const list = [];
-
-  for (let i = 0; i < SURF.fronts; i += 1) {
-    const raw = i / SURF.fronts + scroll;
-    const serial = Math.floor(raw); // 第几条浪（同一条浪的编号不变 → 形状不变）
-    const depth = raw - serial;
-    list.push({
-      i,
-      serial,
-      depth: Math.max(0.0001, depth),
-      y: depthToY(depth, H, horizonY),
-      key: serial * 0.37 + i * 1.91,
-    });
-  }
-
-  list.sort((a, b) => a.y - b.y); // 远 → 近，后画的盖住先画的
-
-  for (let k = 0; k < list.length; k += 1) {
-    const front = list[k];
-    const nextY = k + 1 < list.length ? list[k + 1].y : H;
-    const gap = Math.max(2, nextY - front.y);
-    // 振幅：越近越大；breaking 的浪头再鼓一点（0.6Hz 起伏，L4 的节奏）
-    let amp = span * lerp(SURF.ampFar, SURF.ampNear, Math.pow(front.depth, 0.85));
-    amp *= 0.86 + 0.28 * hash1(front.key);
-    front.breaking = front.depth >= SURF.breakDepth;
-    if (front.breaking) {
-      const bulge = 0.5 + 0.5 * Math.sin(TAU * L4.freq * t + hash1(front.key + 2.2) * TAU);
-      amp *= 1 + 0.4 * bulge;
-      front.bulge = bulge;
-    }
-    front.amp = Math.min(amp, gap * SURF.ampGuard); // 不许和下一条波前穿插
-    // 每条浪的波长还各自差 ±18%：相邻浪脊的起伏节奏不同，才不会看出「同一条线往下搬」
-    front.waveScale = lerp(1, SURF.waveGrow, front.depth) * (0.82 + 0.36 * hash1(front.serial * 11.7 + front.i * 5.3));
-    front.phase = hash1(front.key + 7.7) * TAU; // 形状跟着浪走，不随时间推进
-
-    // ── 去「一排排管子」：每条波前自己的低频倾斜与相位错开 ──
-    const hTilt = hash1(front.serial * 3.11 + front.i * 7.77);
-    const hShift = hash1(front.serial * 5.93 + front.i * 2.31);
-    // 倾斜：近处更明显（±2.2% 屏高），让浪脊斜着走、相邻两条会交叉
-    front.tiltPx = (hTilt - 0.5) * 2 * SURF.tiltMax * span * (0.3 + 0.7 * front.depth);
-    // 横向相位错开 ±0.35rad：相邻波前的起伏不同步（同一条线不再被原样往下搬）
-    front.shift = (hShift - 0.5) * 2 * SURF.phaseShell;
-    // 高光「断成几段」用的低频包络相位
-    front.envA = hash1(front.serial * 9.17 + front.i * 4.13) * TAU;
-    front.envB = hash1(front.serial * 1.37 + front.i * 8.19) * TAU;
-    // 行距本身也别等距：每条波前带一个随它走的竖向抖动（±0.22 间距），
-    // 排序仍严格（<半个间距），但相邻高差不再是一条平滑的透视曲线
-    front.jitterY = (hash1(front.serial * 7.31 + front.i * 3.17) - 0.5) * 0.44 * gap;
-    // 地平线附近 1/4 屏的碎纹：振幅 1–2px（绝对像素），过了 0.25 就没有
-    front.grainPx = SURF.grainPx * clamp01(1 - front.depth / SURF.grainDepth);
-  }
-  return list;
-}
-
-/**
- * 波前在横向 u01∈[0,1] 处的高程（-1..1，正数=浪峰抬起）。
- * 三组正弦叠加，横向波数随 depth 变小（近处波长更长）；相位来自波前自身。
- */
-function crestOffset(front, u01, t) {
-  const breathe = Math.sin(t * 0.13 + front.depth * 2.6) * 0.12; // 极慢呼吸，不是横向漂移
-  let value = 0;
-  for (let j = 0; j < 3; j += 1) {
-    const waves = L2.waves[j] * front.waveScale;
-    value += Math.sin(TAU * u01 * waves + front.phase + num(front.shift, 0) + j * L2.phaseGap + breathe * (j + 1)) * L2.weights[j];
-  }
-  // 高频细节：浪脊不是一根光滑的缎带，边缘总是碎的
-  const detail = 4.5 + 2.5 * front.depth;
-  value += Math.sin(TAU * u01 * detail + front.phase * 2.3 + num(front.shift, 0) * 2 + breathe * 2) * 0.06;
-  value += Math.sin(TAU * u01 * (detail * 3.1) - front.phase * 1.4) * 0.03;
-  return clamp(value, -1.35, 1.35);
-}
-
-/** 波前在 u01 处的屏幕 y：浪脊高程 + 低频倾斜 + 地平线附近的高频碎纹。 */
-function crestY(front, u01, t) {
-  const tilt = (u01 - 0.5) * num(front.tiltPx, 0);
-  const grainPx = num(front.grainPx, 0);
-  let grain = 0;
-  if (grainPx > 0.01) {
-    // 碎纹：两条高频正弦，挂在波前上（跟着浪走），只为把带隙抹糊
-    grain =
-      grainPx *
-      (Math.sin(TAU * u01 * 37 + front.phase * 3.1) * 0.6 + Math.sin(TAU * u01 * 71 - front.phase * 1.7) * 0.4);
-  }
-  return front.y + num(front.jitterY, 0) - front.amp * crestOffset(front, u01, t) + tilt + grain;
-}
-
-/**
- * 画整片浪区：从远到近，每条波前 =「浪峰面（亮）+ 波谷（暗）」一整条竖向渐变，
- * 下边界正好是下一条波前的浪脊，所以相邻两条严丝合缝、不重叠也不留缝。
- * 返回 fronts 供泡沫/碎光继续用。
- */
-function drawSurf(ctx, W, H, t, pal, tideN, px) {
-  const horizonY = H * HORIZON + tideN * H * 0.006;
-  const fronts = waveFronts(t, H, horizonY);
-  const exposure = clamp01(pal.exposure);
-  const light = 0.35 + 0.65 * exposure; // 没光了就别描白线
-  const skyMirror = mix(pal.skyBottom, pal.seaFar, 0.35);
-  const deep = mix(pal.seaNear, pal.seaMid, 0.15);
-  const troughTint = mix(pal.seaNear, '#02040a', 0.55);
-  const crestTint = mix(pal.foam, pal.horizonGlow, 0.45);
-  const steps = Math.max(36, Math.round(W / 14));
-  const STOPS = 28; // 横向高光的渐变档数（沿浪脊平滑变化，不是一条平齐的亮线）
-
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    const nextY = k + 1 < fronts.length ? fronts[k + 1].y : H;
-    const gap = Math.max(3, nextY - front.y);
-    const bandH = Math.max(6, gap * SURF.overlap); // 带子跨过下一条波前 → 重叠，近的盖远的
-
-    // 这一行的水色：掠射的远水反射天空，近水是深水色
-    const reflect = clamp01(1 - front.depth) * lerp(0.42, 0.84, 1 - exposure);
-    const water = mix(deep, skyMirror, reflect);
-    const frontLight = 0.7 + 0.55 * hash1(front.key + 11.1); // 每条浪的醒目程度不同
-    const crestColor = mix(water, crestTint, (0.09 + 0.3 * front.depth) * light * frontLight);
-    const midColor = mix(water, troughTint, 0.14 + 0.16 * front.depth);
-    const troughColor = mix(water, troughTint, 0.3 + 0.18 * front.depth);
-
-    // 浪面：上边界是浪脊曲线，下边界是一条平线 → 带子厚度随浪脊高低变化
-    // （若下边界也跟着弯，每条带就成了等宽的「管子」，一眼假）
-    const bottomY = Math.min(H + bandH, front.y + gap * 1.15);
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t) - front.amp * 0.5;
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    ctx.lineTo(W, bottomY);
-    ctx.lineTo(0, bottomY);
-    ctx.closePath();
-    const faceTop = Math.max(0, front.y - front.amp * 1.05);
-    const face = ctx.createLinearGradient(0, faceTop, 0, bottomY);
-    // 上沿先用透明过渡（软边界），再进入浪峰亮色 → 不会出现「亮边压在暗块上」的岩层感
-    face.addColorStop(0, rgba(crestColor, 0.25));
-    face.addColorStop(0.14, rgba(crestColor, 0.95));
-    face.addColorStop(0.45, midColor);
-    face.addColorStop(1, troughColor);
-    ctx.fillStyle = face;
-    ctx.fill();
-
-    // 同一块浪面再叠一层横向低频明暗：这一段被前面的浪遮住、那一段被照亮
-    // （路径还在，直接换 fillStyle 再 fill 一次即可）
-    const occl = ctx.createLinearGradient(0, 0, W, 0);
-    for (let s0 = 0; s0 < 8; s0 += 1) {
-      const u0 = s0 / 8;
-      const k = 0.5 + 0.5 * Math.sin(TAU * 2.1 * u0 + front.envA * 1.7);
-      occl.addColorStop(u0, rgba(troughTint, SURF.bandLight * (0.35 + 0.65 * k)));
-    }
-    occl.addColorStop(1, rgba(troughTint, 0.02));
-    ctx.fillStyle = occl;
-    ctx.fill();
-
-    // 沿浪脊的明暗（横向渐变）：浪脊高的地方亮、低的地方暗。
-    // 同一条渐变既用来铺浪面上半部、也用来描浪脊线 —— 横向有明暗，才不像肋条。
-    const sheen = ctx.createLinearGradient(0, 0, W, 0);
-    for (let s0 = 0; s0 < STOPS; s0 += 1) {
-      const u0 = s0 / STOPS;
-      const u1 = (s0 + 1) / STOPS;
-      // 沿浪脊的哈希抖动：让「亮斑/暗斑」沿一条浪脊不匀（等距就会看出虚纹）
-      const patch = (hash1(front.key + s0 * 3.7) - 0.5) * 0.85;
-      const h = crestOffset(front, (u0 + u1) / 2, t) + patch;
-      // 低频包络：把高光打断成「几段亮、几段暗」，暗处回到水色
-      const env = Math.pow(0.5 + 0.5 * Math.sin(TAU * 3.1 * u0 + front.envA) * Math.sin(TAU * 1.7 * u0 + front.envB), 1.7);
-      const a = clamp01(0.34 + 0.66 * h) * env;
-      sheen.addColorStop(clamp01(u0), rgba(mix(water, crestTint, (0.3 + 0.45 * front.depth) * light), (0.05 + 0.3 * front.depth) * light * a * frontLight));
-    }
-    sheen.addColorStop(1, rgba(mix(water, crestTint, 0.3 * light), 0.02));
-
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t);
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    const hlThick = Math.max(1.5, front.amp * (0.3 + 0.22 * front.depth));
-    for (let s0 = steps; s0 >= 0; s0 -= 1) {
-      const u = s0 / steps;
-      ctx.lineTo(u * W, crestY(front, u, t) + hlThick);
-    }
-    ctx.closePath();
-    ctx.fillStyle = sheen;
-    ctx.fill();
-
-    // 浪脊线：用同一条横向渐变描，亮暗跟着浪脊走
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t);
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    ctx.strokeStyle = sheen;
-    ctx.lineWidth = (0.4 + 1.1 * front.depth) * px;
-    ctx.stroke();
-
-    // breaking：浪后压暗 + 浪顶白沫沿波前横向铺开（近景才有）
-    if (front.breaking) drawBreakingFace(ctx, W, H, pal, t, front, px);
-  }
-
-  return fronts;
-}
-
-/** 单次翻白事件的包络：一次涨、一次落，一个周期只翻一次（契约 L4）。 */
-function whitecapEnvelope(t) {
-  const period = L4.eventPeriod;
-  const phase = (((t % period) + period) % period) / period;
-  if (phase < L4.eventRise) return clamp01(phase / L4.eventRise);
-  const decay = (phase - L4.eventRise) / L4.eventDecay;
-  return decay >= 1 ? 0 : clamp01(1 - decay);
-}
-
-/**
- * breaking 浪头：浪后（屏幕上方的背面）压暗，浪顶一条逐渐变宽的白沫卷边。
- * 白沫的强弱与横向范围由 0.6Hz 的鼓起程度 + 单次翻白事件共同决定。
- */
-function drawBreakingFace(ctx, W, H, pal, t, front, px) {
-  void H;
-  const steps = Math.max(24, Math.round(W / 20));
-  const bulge = clamp01(num(front.bulge, 0.5));
-  const burst = whitecapEnvelope(t); // 单次大翻白（保留 L4 的事件）
-  const strength = clamp01(0.25 + 0.55 * bulge + 0.5 * burst);
-  const crestTint = mix(pal.foam, pal.horizonGlow, 0.35);
-  const shadeDepth = (0.045 + 0.03 * front.depth) * H; // 浪后压暗的厚度
-
-  // 1) 浪后压暗：从浪脊往上（更远处）一层深色，制造「浪头立起来」的体量
-  ctx.beginPath();
-  for (let s = 0; s <= steps; s += 1) {
-    const u = s / steps;
-    ctx.lineTo(u * W, crestY(front, u, t));
-  }
-  ctx.lineTo(W, crestY(front, 1, t) - shadeDepth);
-  ctx.lineTo(0, crestY(front, 0, t) - shadeDepth);
-  ctx.closePath();
-  const shade = ctx.createLinearGradient(0, front.y - front.amp - shadeDepth, 0, front.y);
-  shade.addColorStop(0, rgba('#04070f', 0));
-  shade.addColorStop(1, rgba('#04070f', 0.18 + 0.24 * strength));
-  ctx.fillStyle = shade;
-  ctx.fill();
-
-  // 2) 浪顶白沫：沿波前连续铺开的一条白边（浪脊越高越白越厚）
-  ctx.beginPath();
-  for (let s = 0; s <= steps; s += 1) {
-    const u = s / steps;
-    const h = crestOffset(front, u, t);
-    const thick = front.amp * (0.12 + 0.5 * clamp01(h)) * (0.5 + 0.9 * strength);
-    ctx.lineTo(u * W, crestY(front, u, t) + thick);
-  }
-  for (let s = steps; s >= 0; s -= 1) {
-    const u = s / steps;
-    ctx.lineTo(u * W, crestY(front, u, t) - front.amp * 0.06);
-  }
-  ctx.closePath();
-  const foam = ctx.createLinearGradient(0, front.y - front.amp * 0.2, 0, front.y + front.amp * 0.7);
-  foam.addColorStop(0, rgba(crestTint, clamp01(0.3 * strength)));
-  foam.addColorStop(0.55, rgba(crestTint, clamp01(0.62 * strength)));
-  foam.addColorStop(1, rgba(crestTint, clamp01(0.1 * strength)));
-  ctx.fillStyle = foam;
-  ctx.fill();
-
-  // 3) 大翻白：一个横向位置上的爆白团，随波前一起下移
-  if (burst > 0.05) {
-    const centerU = clamp(0.5 + 0.32 * Math.sin(t * 0.19), 0.08, 0.92);
-    const width = (0.1 + 0.07 * front.depth) * W;
-    ctx.fillStyle = rgba(crestTint, clamp01(0.5 * burst));
-    for (let i = 0; i < 4; i += 1) {
-      const u = clamp(centerU + (hash1(i * 4.3 + front.serial) - 0.5) * 0.12, 0.02, 0.98);
-      const y = crestY(front, u, t) + front.amp * (0.08 + 0.3 * hash1(i * 2.1 + front.key));
-      blob(ctx, u * W, y, width * (0.12 + 0.2 * hash1(i * 7.3)), Math.max(1, front.amp * 0.18 * (0.7 + hash1(i * 3.9))));
-    }
-  }
-  void px;
-}
-
-/**
- * 细碎纹理：整片海面撒一层很小的亮点/暗点。
- * 没有这一层，浪面就是大片平滑渐变 —— 一眼就能看出是画的。
- * 密度与亮度跟着「离浪脊多近」和「还有多少光」走，越远越密（透视）。
- */
-function surfTexture(ctx, W, H, t, pal, tideN, px, fronts) {
-  const horizonY = H * HORIZON + tideN * H * 0.006;
-  const exposure = clamp01(pal.exposure);
-  const count = Math.round(clamp(W / 3.2, 200, 700));
-  const skyMirror = mix(pal.skyBottom, pal.seaFar, 0.35);
-  const deep = mix(pal.seaNear, pal.seaMid, 0.15);
-  const lightTint = mix(pal.foam, pal.horizonGlow, 0.35);
-  const darkTint = mix(pal.seaNear, '#02040a', 0.6);
-
-  for (let i = 0; i < count; i += 1) {
-    const r1 = hash1(i * 1.7 + 0.31);
-    const r2 = hash1(i * 3.9 + 0.77);
-    const r3 = hash1(i * 7.1 + 0.13);
-    // 透视：u² 让样本在地平线附近更密
-    const depth = Math.pow(r1, 1.7) * 0.98 + 0.01;
-    const y = depthToY(depth, H, horizonY) + (r2 - 0.5) * H * 0.006;
-    if (y < horizonY || y > H) continue;
-    const u = r3;
-    // 离最近的一条浪脊多近（越近越亮）
-    let near = 0;
-    for (let k = 0; k < fronts.length; k += 1) {
-      const front = fronts[k];
-      if (Math.abs(front.depth - depth) > 0.06) continue;
-      const h = crestOffset(front, u, t);
-      if (h > 0) near = Math.max(near, h);
-    }
-    const water = mix(deep, skyMirror, clamp01(1 - depth) * lerp(0.42, 0.84, 1 - exposure));
-    const bright = hash1(i * 11.3 + t * 0.13) > 0.42;
-    const alpha = (0.07 + 0.26 * near) * (0.4 + 0.6 * exposure) * (0.5 + 0.5 * r2);
-    if (alpha <= 0.02) continue;
-    ctx.fillStyle = rgba(bright ? mix(water, lightTint, 0.5) : darkTint, alpha);
-    const w = (1 + 2.4 * r2) * px * (0.7 + 1.2 * depth);
-    ctx.fillRect(u * W, y, w, Math.max(0.7, 0.9 * px));
-  }
-}
-
-/**
- * 泡沫：沿每条波前的**浪脊**连续分布的斑块（不是网格、不是虚线）。
- * 位置由 (波前编号, 沿浪脊的采样序号) 哈希决定 → 斑块跟着浪一起往下走。
- */
-function surfFoam(ctx, W, H, t, pal, tideN, px, fronts) {
-  const exposure = clamp01(pal.exposure);
-  const coverage = clamp(lerp(L3.coverageMin, L3.coverageMax, clamp01(0.55 + 0.45 * tideN)), L3.coverageMin, L3.coverageMax);
-  const foamTint = mix(pal.foam, pal.horizonGlow, 0.4);
-  const step = Math.max(0.012, SURF.foamStep);
-  const alphaBase = clamp01(0.35 + 0.75 * exposure);
-
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    // 只在浪脊最高的那几段起白：一屏能数出来的白斑就 4–8 处
-    const gate = 0.55 - 0.5 * coverage * 6;
-    const density = 0.12 + coverage * 1.6;
-    const slots = Math.max(20, Math.round(1 / step));
-    for (let s0 = 0; s0 < slots; s0 += 1) {
-      const pick = hash1(front.key * 5.3 + s0 * 1.37);
-      if (pick > density) continue;
-      // 位置抖开 ±0.1 屏宽：相邻斑块可以并成一片，也不会排成等距虚线
-      const u = clamp01((s0 + 0.5 + (hash1(front.key * 2.9 + s0 * 2.7) - 0.5) * 2.6) / slots);
-      const h = crestOffset(front, u, t);
-      if (h < gate) continue;
-      const jitter = hash1(front.key * 4.1 + s0 * 3.3);
-      const x = (u + (jitter - 0.5) * step * 0.6) * W;
-      const life = 0.55 + 0.45 * Math.sin(t * TAU * 0.23 + u * 9.0 + front.depth * 4.0);
-      const scale = 0.55 + 0.9 * hash1(front.key + u * 13.0);
-      const alpha = Math.min(
-        SURF.foamAlphaMax,
-        clamp01((h - gate) / (1 - gate)) * alphaBase * (0.55 + 0.35 * front.depth) * (0.6 + 0.4 * life),
-      );
-      if (alpha <= 0.03) continue;
-      // 贴着浪脊走：半宽随 depth 放大，长宽比 ≥ 4:1（不再是圆斑）
-      const y0 = crestY(front, u, t) + front.amp * 0.06;
-      const height = Math.max(0.8, SURF.foamSize * px * (0.55 + 0.9 * front.depth) * scale);
-      const width = height * (SURF.foamAspect + 1.5 * front.depth);
-      ctx.fillStyle = rgba(foamTint, alpha);
-      blob(ctx, x, y0, width, height);
-      // 拖尾：朝观察者（画面下方）淡出的一小片，像被浪推着走
-      ctx.fillStyle = rgba(foamTint, alpha * 0.34);
-      blob(ctx, x + width * 0.1, y0 + height * 1.9, width * 0.45, Math.max(0.6, height * 0.5));
-    }
-
-    // 底层白气：沿浪脊拉得很长、很薄、很淡。铺出「白沫沿着浪脊走」的连续感，
-    // 同时把覆盖率顶进契约的 3%–9%，但不会出现一粒粒可见的白斑。
-    for (let k = 0; k < 3; k += 1) {
-      const u2 = clamp01(hash1(front.key * 6.1 + k * 17.3) * 0.8 + 0.1);
-      const h2 = crestOffset(front, u2, t);
-      if (h2 < gate - 0.25) continue;
-      const breathe2 = 0.5 + 0.5 * Math.sin(t * TAU * 0.19 + k * 2.1 + front.depth * 3);
-      ctx.fillStyle = rgba(foamTint, 0.05 + 0.04 * breathe2);
-      blob(
-        ctx,
-        u2 * W,
-        crestY(front, u2, t) + front.amp * 0.04,
-        W * (0.055 + 0.05 * front.depth),
-        Math.max(0.9, SURF.foamSize * px * 0.3 * (0.7 + 0.8 * front.depth)),
-      );
-    }
-  }
-}
-
-/**
- * 碎光：在浪脊上按「哪一面朝向太阳」点亮（不是一条固定的竖光柱）。
- * 横向斜率决定是左坡还是右坡朝光，离太阳方位角越近越亮，逐片自己的闪灭相位。
- */
-function surfSpecular(ctx, W, H, t, pal, fronts, px) {
-  const body = pal.sun || pal.moon;
-  if (!body) return;
-  const sunU = clamp(body.x, 0, 1);
-  const floorY = pal.sun ? 0.34 : 0.1;
-  const spanK = pal.sun ? 0.18 : 0.3;
-  const intensity = clamp01((body.y - floorY) / spanK) * clamp01(body.alpha);
-  if (intensity <= 0.05) return;
-  const tint = pal.sun ? mix(pal.horizonGlow, '#ffffff', 0.62) : mix(pal.moon.color, '#ffffff', 0.45);
-  const step = Math.max(0.02, SURF.foamStep * 0.7);
-  const eps = 0.004;
-
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    if (front.depth < 0.04) continue;
-    for (let u = 0; u < 1; u += step) {
-      const h = crestOffset(front, u, t);
-      if (h < 0.3) continue; // 只有浪脊顶才反光
-      // 朝光的那一侧：横向斜率 × 太阳在左/在右
-      const slope = (crestOffset(front, u + eps, t) - crestOffset(front, u - eps, t)) / (2 * eps);
-      const facing = clamp01(0.5 + 0.5 * slope * (u < sunU ? 1 : -1));
-      const nearSun = 1 - Math.min(1, Math.abs(u - sunU) * 1.6);
-      const seed = hash1(front.key * 3.3 + u * 71.0);
-      const twinkle = Math.pow(0.5 + 0.5 * Math.sin(t * (1.2 + seed * 3.4) + u * 33.0), 3);
-      const alpha = intensity * facing * (0.3 + 0.7 * nearSun) * (0.18 + 0.82 * twinkle) * (0.35 + 0.55 * front.depth);
-      if (alpha <= 0.03) continue;
-      ctx.fillStyle = rgba(tint, alpha);
-      blob(
-        ctx,
-        u * W,
-        crestY(front, u, t) + front.amp * 0.06,
-        (1.1 + 3.2 * front.depth) * (0.55 + 0.8 * twinkle) * px,
-        Math.max(0.7, (0.6 + 0.9 * front.depth) * px),
-      );
-    }
-  }
-}
-/* ==========================================================================
- * 媒体层（契约 A3）：真实照片/视频做基底，上叠天光罩 / 水面呼吸 / 地平线雾 / 暗角
- * 加载失败、解码失败、跨域被拒一律静默退回程序化海（见组件里的 asset 控制器）
- * ========================================================================== */
-
-/** 设置里的 media.grade（0..1，0=原图）。缺字段/非法 → 0.55。 */
 function gradeOf(media) {
   if (!media || typeof media !== 'object') return 0.55;
   const flat = media.grade !== undefined ? media.grade : media.settings && media.settings.grade;
@@ -1017,7 +531,7 @@ export function __lastRenderTime() {
   return lastRenderTime;
 }
 
-function renderScene(ctx, W, H, t, pal, tideN, warmth) {
+function renderScene(ctx, W, H, t, pal, tideN, warmth, field) {
   lastRenderTime = t;
   const px = clamp(H / 720, 0.65, 1.8);
   const nearLift = tideN * H * 0.006; // 潮位只让水位线轻微起伏，不喧宾夺主
@@ -1037,14 +551,20 @@ function renderScene(ctx, W, H, t, pal, tideN, warmth) {
   drawSun(ctx, W, H, pal);
   drawMoon(ctx, W, H, pal);
 
-  // L1 远海
-  drawFarSea(ctx, W, H, horizonY, pal, t, px);
-
-  // 浪区：N 条波前从地平线朝观察者推过来（一次画完，返回 fronts 给泡沫/碎光用）
-  const fronts = drawSurf(ctx, W, H, t, pal, tideN, px);
-  surfTexture(ctx, W, H, t, pal, tideN, px, fronts);
-  surfFoam(ctx, W, H, t, pal, tideN, px, fronts);
-  surfSpecular(ctx, W, H, t, pal, fronts, px);
+  // 水面：**斑块场**（不是一排排浪脊）。
+  // 低分辨率高度场按透视采样噪声 → 整块放大 → 随机的碎块、近大远小、无贯通全屏的条纹。
+  // 失败（拿不到缓冲）就退回一版最简单的竖向渐变，绝不留白。
+  let drawn = false
+  if (field) {
+    try {
+      drawn = drawWater(ctx, { W, H, horizonY, t, pal, tideN }, field)
+    } catch (_error) {
+      drawn = false
+    }
+  }
+  if (!drawn) {
+    drawFarSea(ctx, W, H, horizonY, pal, t, px)
+  }
 
   // reducedMotion 的「色温微变」：极薄一层冷暖罩，alpha ≈ 0.02
   if (warmth) {

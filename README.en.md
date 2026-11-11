@@ -15,7 +15,7 @@ Every N minutes the screen is handed to the sea **as it is right now**, for thre
 - **On a schedule** — 3 minutes every 120 minutes by default. It fades out on its own: no prompt, no residue, your draft and scroll position untouched.
 - **True to this moment** — the phase comes from **solar altitude**, not clock time (Shanghai may be at dusk while Reykjavik is still in the afternoon); the moon is drawn from a 29.53-day synodic approximation; stars at night; polar day/night handled separately.
 - **Two kinds of sea**:
-  - procedural — five palettes plus wave fronts advancing toward the viewer, no network and no assets (the fallback);
+  - procedural — five palettes plus a perspective noise field: randomly distributed water patches that grow toward the viewer, with sun glitter and near-field whitecaps (the fallback);
   - media — a random image/video from a folder you choose, or a web/image link that is fetched once and cached, then graded to match the current light.
 - **Countdown in the top-right** — always-visible `m:ss`, frozen while paused.
 - **Forms** — full screen, or a draggable corner window that snaps to any corner; both share the remaining time of the same appearance.

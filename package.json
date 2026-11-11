@@ -1,6 +1,6 @@
 {
   "name": "dsh-intertidal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "潮间（Intertidal）：让 DSH 按设定间隔把屏幕交给一片此刻的海，到点自己退走。天光跟随本地太阳位置，可用自己的图片或视频作海面。不采集数据。",
   "license": "MIT",
   "type": "module",

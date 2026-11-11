@@ -325,9 +325,205 @@ function paletteFor(now) {
   }
 }
 
+// src/client/water.js
+var TAU = Math.PI * 2;
+var BUFFER_W = 430;
+var MAX_BUFFER_H = 260;
+var MIN_BUFFER_H = 40;
+function hash2(x, y) {
+  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263);
+  h = Math.imul(h ^ h >>> 13, 1274126177);
+  return ((h ^ h >>> 16) >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi);
+  const b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1);
+  const d = hash2(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbmSmooth(x, y) {
+  return 0.55 * vnoise(x, y) + 0.3 * vnoise(x * 2.07 + 3.1, y * 2.07 + 1.7) + 0.15 * vnoise(x * 4.31 + 7.7, y * 4.31 + 3.3);
+}
+function fbmRidged(x, y) {
+  let sum = 0;
+  let amp = 0.6;
+  let freq = 1;
+  let total = 0;
+  for (let o = 0; o < 4; o += 1) {
+    const n = vnoise(x * freq + o * 13.7, y * freq + o * 7.3);
+    sum += amp * (1 - Math.abs(2 * n - 1));
+    total += amp;
+    amp *= 0.52;
+    freq *= 2.17;
+  }
+  return sum / total;
+}
+function hexToRgb(hex) {
+  const text = String(hex ?? "").replace("#", "");
+  if (text.length !== 6) return [0, 0, 0];
+  return [parseInt(text.slice(0, 2), 16), parseInt(text.slice(2, 4), 16), parseInt(text.slice(4, 6), 16)];
+}
+var clamp012 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+var lerp = (a, b, t) => a + (b - a) * t;
+function ensureSize(field2, width, height) {
+  if (field2.width === width && field2.height === height && field2.image) return true;
+  field2.width = width;
+  field2.height = height;
+  field2.h = new Float32Array(width * height);
+  if (!field2.canvas || !field2.ctx) return false;
+  field2.canvas.width = width;
+  field2.canvas.height = height;
+  field2.image = field2.ctx.createImageData(width, height);
+  return true;
+}
+function drawWater(ctx, view, field2) {
+  const { W, H, horizonY, t } = view;
+  const pal = view.pal ?? {};
+  const tideN = Number.isFinite(view.tideN) ? view.tideN : 0;
+  const waterH = Math.max(1, H - horizonY);
+  const bw = BUFFER_W;
+  const bh = Math.max(MIN_BUFFER_H, Math.min(MAX_BUFFER_H, Math.round(bw * waterH / Math.max(1, W))));
+  if (!ensureSize(field2, bw, bh)) return false;
+  const exposure = clamp012(Number.isFinite(pal.exposure) ? pal.exposure : 0.8);
+  const deep = hexToRgb(pal.seaNear ?? "#0d1729");
+  const mid = hexToRgb(pal.seaMid ?? "#27728e");
+  const far = hexToRgb(pal.seaFar ?? "#4793ae");
+  const sky = hexToRgb(pal.skyBottom ?? "#b7e1f6");
+  const foam = hexToRgb(pal.foam ?? "#ffffff");
+  const glow = hexToRgb(pal.horizonGlow ?? "#ffd5a8");
+  const body = pal.sun || pal.moon || null;
+  const bodyX = body ? clamp012(body.x) : 0.5;
+  const bodyColor = hexToRgb(body?.color ?? pal.horizonGlow ?? "#fff6e2");
+  const bodyAlpha = body ? clamp012(body.alpha ?? 0.8) : 0.35;
+  const heights = field2.h;
+  const scroll = t * 0.55;
+  const XSPREAD = 6.2;
+  const WFREQ = 5.4;
+  const XFREQ = 1.45;
+  let idx = 0;
+  for (let j = 0; j < bh; j += 1) {
+    const d = (j + 0.5) / bh;
+    const zc = 1 / (0.38 + d * 2.4);
+    const wz = zc - scroll;
+    for (let i = 0; i < bw; i += 1) {
+      const wx = ((i + 0.5) / bw - 0.5) * zc * XSPREAD;
+      const ridge = fbmRidged(wx * XFREQ + 3, wz * WFREQ);
+      const smooth = fbmSmooth(wx * XFREQ * 1.9 + 11.3, wz * WFREQ * 0.72 + 5.1);
+      const w = 0.28 + 0.42 * d;
+      heights[idx] = ridge * w + smooth * (1 - w);
+      idx += 1;
+    }
+  }
+  const data = field2.image.data;
+  let p = 0;
+  for (let j = 0; j < bh; j += 1) {
+    const d = (j + 0.5) / bh;
+    const haze = (1 - d) * (1 - d) * (0.55 + 0.35 * exposure);
+    const nearness = clamp012(d * 1.6);
+    const rBase = lerp(lerp(far[0], mid[0], nearness), deep[0], Math.max(0, d - 0.35) / 0.65);
+    const gBase = lerp(lerp(far[1], mid[1], nearness), deep[1], Math.max(0, d - 0.35) / 0.65);
+    const bBase = lerp(lerp(far[2], mid[2], nearness), deep[2], Math.max(0, d - 0.35) / 0.65);
+    const foamBand = clamp012((d - 0.78) / 0.22) * clamp012(0.45 + 0.45 * tideN);
+    const rowLight = 0.5 + 0.5 * exposure;
+    for (let i = 0; i < bw; i += 1) {
+      const h = heights[j * bw + i];
+      const hx = (heights[j * bw + Math.min(bw - 1, i + 1)] - heights[j * bw + Math.max(0, i - 1)]) * 0.5;
+      const hz = (heights[Math.min(bh - 1, j + 1) * bw + i] - heights[Math.max(0, j - 1) * bw + i]) * 0.5;
+      const tilt = -(hx * (bodyX - 0.5) * 4.4 + hz * 1.15);
+      const shade = clamp012(0.5 + tilt * 3.4);
+      const crest = clamp012((h - 0.4) / 0.6);
+      let r = rBase * shade;
+      let g = gBase * shade;
+      let b = bBase * shade;
+      r = lerp(r, sky[0], haze * 0.62);
+      g = lerp(g, sky[1], haze * 0.62);
+      b = lerp(b, sky[2], haze * 0.62);
+      const crestLight = crest * crest * clamp012(0.25 + tilt * 2.2) * rowLight;
+      r += glow[0] * crestLight * 0.3;
+      g += glow[1] * crestLight * 0.3;
+      b += glow[2] * crestLight * 0.28;
+      const spec = Math.pow(clamp012(0.26 - tilt * 1.35), 5) * crest * bodyAlpha;
+      if (spec > 4e-3) {
+        r += bodyColor[0] * spec * 1.35;
+        g += bodyColor[1] * spec * 1.35;
+        b += bodyColor[2] * spec * 1.35;
+      }
+      if (foamBand > 0.01) {
+        const mask = clamp012((h - (0.72 - 0.1 * foamBand)) / 0.24) * foamBand;
+        if (mask > 0.01) {
+          const a = mask * 0.32;
+          r = lerp(r, foam[0], a);
+          g = lerp(g, foam[1], a);
+          b = lerp(b, foam[2], a);
+        }
+      }
+      data[p] = r > 255 ? 255 : r < 0 ? 0 : r;
+      data[p + 1] = g > 255 ? 255 : g < 0 ? 0 : g;
+      data[p + 2] = b > 255 ? 255 : b < 0 ? 0 : b;
+      data[p + 3] = 255;
+      p += 4;
+    }
+  }
+  field2.ctx.putImageData(field2.image, 0, 0);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  try {
+    ctx.imageSmoothingQuality = "high";
+  } catch {
+  }
+  ctx.drawImage(field2.canvas, 0, horizonY, W, waterH);
+  ctx.restore();
+  try {
+    drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, glow });
+  } catch {
+  }
+  try {
+    const hazeH = Math.max(2, waterH * 0.09);
+    const grad = ctx.createLinearGradient(0, horizonY - hazeH * 0.4, 0, horizonY + hazeH);
+    grad.addColorStop(0, `rgba(${sky[0] | 0},${sky[1] | 0},${sky[2] | 0},${0.55 + 0.35 * (1 - exposure)})`);
+    grad.addColorStop(1, `rgba(${sky[0] | 0},${sky[1] | 0},${sky[2] | 0},0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, horizonY - hazeH * 0.4, W, hazeH * 1.4);
+  } catch {
+  }
+  return true;
+}
+function drawGlitter(ctx, { W, H, horizonY, t, pal, exposure, bodyX, bodyAlpha, glow }) {
+  const waterH = H - horizonY;
+  if (waterH <= 2) return;
+  const count = Math.round((40 + 150 * exposure) * clamp012(bodyAlpha + 0.2));
+  const sunU = bodyX;
+  ctx.save();
+  for (let n = 0; n < count; n += 1) {
+    const seedA = hash2(n * 3 + 1, 7);
+    const seedB = hash2(n * 5 + 2, 13);
+    const seedC = hash2(n * 7 + 3, 19);
+    const d = Math.pow(seedA, 0.72);
+    const y = horizonY + d * waterH;
+    const spread = 0.18 + 0.34 * d;
+    const x = (sunU + (seedB - 0.5) * 2 * spread) * W;
+    if (x < 0 || x > W) continue;
+    const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * (1.4 + seedC * 3.2) + seedC * TAU));
+    const alpha = twinkle * (0.12 + 0.34 * exposure) * clamp012(1 - Math.abs(seedB - 0.5) * 1.9);
+    if (alpha < 0.03) continue;
+    const len = 1 + 1.6 * d + seedC;
+    ctx.fillStyle = `rgba(${glow[0] | 0},${glow[1] | 0},${glow[2] | 0},${alpha.toFixed(3)})`;
+    ctx.fillRect(x, y, len, 1);
+  }
+  ctx.restore();
+}
+var WATER_CONSTANTS = Object.freeze({ BUFFER_W, MAX_BUFFER_H, MIN_BUFFER_H, TAU });
+
 // src/client/sea-canvas.jsx
 var import_jsx_runtime = require("react/jsx-runtime");
-var TAU = Math.PI * 2;
+var TAU2 = Math.PI * 2;
 var TUNING = Object.freeze({
   maxBufferWidth: 1280,
   //       内部渲染缓冲宽度上限（程序化海）
@@ -354,19 +550,6 @@ var TUNING = Object.freeze({
   //                             开 DevTools 会让页面 blur，验收时会被误判成卡死。
 });
 var HORIZON2 = 0.52;
-var L1 = Object.freeze({ freq: 0.08, ampMin: 2, ampMax: 4, spatial: 1.6 });
-var L2 = Object.freeze({
-  // 三组正弦：现在横向驱动每条波前的形状（波长随 depth 放大），
-  // 相位差 1.7rad 保留；契约里的 0.11/0.23/0.37Hz 由波前滚动 + 拍岸节奏承担
-  freqs: [0.11, 0.23, 0.37],
-  //  Hz（三组基底频率，契约 §4.1）
-  phaseGap: 1.7,
-  //              rad，相邻组相位差
-  weights: [0.55, 0.3, 0.15],
-  //  波前高程里三组各占的权重
-  waves: [0.9, 1.6, 2.7]
-  //      横向波数（× 2π）
-});
 var L3 = Object.freeze({
   coverageMin: 0.03,
   //          spec §4.1：覆盖率 3%–9%
@@ -408,10 +591,10 @@ function num2(value, fallback) {
 function clamp2(value, lo, hi) {
   return value < lo ? lo : value > hi ? hi : value;
 }
-function clamp012(value) {
+function clamp013(value) {
   return clamp2(num2(value, 0), 0, 1);
 }
-function lerp(a, b, k) {
+function lerp2(a, b, k) {
   return a + (b - a) * k;
 }
 function round2(value, digits) {
@@ -430,26 +613,11 @@ function rgba(color, alpha) {
     g = parseInt(hex.slice(2, 4), 16) || 0;
     b = parseInt(hex.slice(4, 6), 16) || 0;
   }
-  return "rgba(" + r + "," + g + "," + b + "," + round2(clamp012(alpha), 3) + ")";
+  return "rgba(" + r + "," + g + "," + b + "," + round2(clamp013(alpha), 3) + ")";
 }
 function hash1(n) {
   const s = Math.sin(n * 12.9898) * 43758.5453;
   return s - Math.floor(s);
-}
-function blob(ctx, x, y, rx, ry) {
-  const rw = Math.max(0.1, num2(rx, 0.5));
-  const rh = Math.max(0.1, num2(ry, 0.5));
-  ctx.beginPath();
-  if (typeof ctx.ellipse === "function") {
-    ctx.ellipse(x, y, rw, rh, 0, 0, TAU);
-  } else {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.scale(rw, rh);
-    ctx.arc(0, 0, 1, 0, TAU);
-    ctx.restore();
-  }
-  ctx.fill();
 }
 function drawSky(ctx, W, H, horizonY, pal) {
   const height = Math.max(1, horizonY);
@@ -459,7 +627,7 @@ function drawSky(ctx, W, H, horizonY, pal) {
   gradient.addColorStop(1, pal.skyBottom);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, W, height);
-  const spread = H * (0.09 + 0.07 * (1 - clamp012(pal.exposure)));
+  const spread = H * (0.09 + 0.07 * (1 - clamp013(pal.exposure)));
   const glow = ctx.createLinearGradient(0, horizonY - spread, 0, horizonY + H * 4e-3);
   glow.addColorStop(0, rgba(pal.horizonGlow, 0));
   glow.addColorStop(0.72, rgba(pal.horizonGlow, 0.3));
@@ -471,7 +639,7 @@ function drawSky(ctx, W, H, horizonY, pal) {
   ctx.fillRect(0, hazeTop, W, horizonY - hazeTop);
 }
 function drawStars(ctx, W, H, horizonY, pal, t) {
-  const density = clamp012(pal.stars);
+  const density = clamp013(pal.stars);
   if (density <= 0.01) return;
   const count = Math.round(density * 120);
   const tint = mix(pal.foam, "#ffffff", 0.65);
@@ -483,14 +651,14 @@ function drawStars(ctx, W, H, horizonY, pal, t) {
     const y = hy * hy * ceiling;
     const size = 0.7 + hash1(i * 3.77) * 1.1;
     const twinkle = 0.55 + 0.45 * Math.sin(t * (0.6 + hx * 1.9) + i * 1.3);
-    ctx.fillStyle = rgba(tint, clamp012(density * twinkle) * 0.85);
+    ctx.fillStyle = rgba(tint, clamp013(density * twinkle) * 0.85);
     ctx.fillRect(x, y, size, size);
   }
 }
 function drawSun(ctx, W, H, pal) {
   const sun = pal.sun;
   if (!sun) return;
-  const alpha = clamp012(sun.alpha);
+  const alpha = clamp013(sun.alpha);
   if (alpha <= 0.02) return;
   const cx = clamp2(sun.x, -0.2, 1.2) * W;
   const cy = clamp2(sun.y, -0.2, 1.2) * H;
@@ -501,7 +669,7 @@ function drawSun(ctx, W, H, pal) {
   halo.addColorStop(1, rgba(pal.horizonGlow, 0));
   ctx.fillStyle = halo;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius * 7, 0, TAU);
+  ctx.arc(cx, cy, radius * 7, 0, TAU2);
   ctx.fill();
   const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
   core.addColorStop(0, rgba(sun.color, alpha));
@@ -509,29 +677,29 @@ function drawSun(ctx, W, H, pal) {
   core.addColorStop(1, rgba(sun.color, alpha * 0.5));
   ctx.fillStyle = core;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, TAU);
+  ctx.arc(cx, cy, radius, 0, TAU2);
   ctx.fill();
 }
 function drawMoon(ctx, W, H, pal) {
   const moon = pal.moon;
   if (!moon) return;
-  const alpha = clamp012(moon.alpha);
+  const alpha = clamp013(moon.alpha);
   if (alpha <= 0.02) return;
   const cx = clamp2(moon.x, -0.2, 1.2) * W;
   const cy = clamp2(moon.y, -0.2, 1.2) * H;
   const radius = Math.max(5, H * 0.019);
-  const phase = clamp012(num2(moon.phase, 0.5));
+  const phase = clamp013(num2(moon.phase, 0.5));
   const halo = ctx.createRadialGradient(cx, cy, radius * 0.6, cx, cy, radius * 6);
   halo.addColorStop(0, rgba(moon.color, 0.26 * alpha));
   halo.addColorStop(0.4, rgba(moon.color, 0.08 * alpha));
   halo.addColorStop(1, rgba(moon.color, 0));
   ctx.fillStyle = halo;
   ctx.beginPath();
-  ctx.arc(cx, cy, radius * 6, 0, TAU);
+  ctx.arc(cx, cy, radius * 6, 0, TAU2);
   ctx.fill();
   const waxing = phase < 0.5;
   const p = waxing ? phase : 1 - phase;
-  const rx = Math.max(0.01, radius * Math.abs(Math.cos(TAU * p)));
+  const rx = Math.max(0.01, radius * Math.abs(Math.cos(TAU2 * p)));
   ctx.save();
   if (!waxing) {
     ctx.translate(cx * 2, 0);
@@ -551,13 +719,13 @@ function drawMoon(ctx, W, H, pal) {
   ctx.restore();
 }
 function farSeaNoise(u, t) {
-  const w = TAU * L1.freq;
+  const w = TAU2 * L1.freq;
   return Math.sin(u * L1.spatial + t * w) * 0.5 + Math.sin(u * L1.spatial * 2.6 - t * w * 1.7 + 1.1) * 0.3 + Math.sin(u * L1.spatial * 5.4 + t * w * 2.9 + 2.3) * 0.2;
 }
 function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
-  const amp = lerp(L1.ampMin, L1.ampMax, 0.5 + 0.5 * Math.sin(t * TAU * L1.freq)) * px;
+  const amp = lerp2(L1.ampMin, L1.ampMax, 0.5 + 0.5 * Math.sin(t * TAU2 * L1.freq)) * px;
   const step = Math.max(8, W / 80);
-  const curve = (x) => horizonY - amp * (0.5 + 0.5 * farSeaNoise(x / Math.max(1, W) * TAU, t));
+  const curve = (x) => horizonY - amp * (0.5 + 0.5 * farSeaNoise(x / Math.max(1, W) * TAU2, t));
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(0, curve(0));
@@ -570,7 +738,7 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
   ctx.closePath();
   ctx.clip();
   const gradient = ctx.createLinearGradient(0, horizonY - amp - 2, 0, H);
-  const mirror = 0.45 + 0.25 * (1 - clamp012(pal.exposure));
+  const mirror = 0.45 + 0.25 * (1 - clamp013(pal.exposure));
   gradient.addColorStop(0, mix(pal.seaFar, pal.skyBottom, mirror));
   gradient.addColorStop(0.18, mix(pal.seaFar, pal.skyBottom, mirror * 0.45));
   gradient.addColorStop(0.42, mix(pal.seaFar, pal.seaMid, 0.85));
@@ -579,8 +747,8 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, horizonY - amp - 2, W, H - horizonY + amp + 4);
   ctx.restore();
-  const fogAmount = clamp012(0.3 + 0.5 * (1 - clamp012(pal.exposure)));
-  const fogHeight = H * (0.045 + 0.085 * (1 - clamp012(pal.exposure)));
+  const fogAmount = clamp013(0.3 + 0.5 * (1 - clamp013(pal.exposure)));
+  const fogHeight = H * (0.045 + 0.085 * (1 - clamp013(pal.exposure)));
   const fogColor = mix(pal.skyBottom, pal.horizonGlow, 0.45);
   const fog = ctx.createLinearGradient(0, horizonY - fogHeight * 0.45, 0, horizonY + fogHeight * 0.9);
   fog.addColorStop(0, rgba(fogColor, 0));
@@ -595,391 +763,19 @@ function drawFarSea(ctx, W, H, horizonY, pal, t, px) {
     const xx = Math.min(x, W);
     ctx.lineTo(xx, curve(xx));
   }
-  ctx.strokeStyle = rgba(mix(pal.seaFar, pal.foam, 0.3), 0.06 + 0.16 * clamp012(pal.exposure));
+  ctx.strokeStyle = rgba(mix(pal.seaFar, pal.foam, 0.3), 0.06 + 0.16 * clamp013(pal.exposure));
   ctx.lineWidth = Math.max(0.6, 1.1 * px);
   ctx.stroke();
-}
-var SURF = Object.freeze({
-  fronts: 10,
-  //                 同屏波前条数（再多就成了铺瓦）
-  period: 5.4,
-  //                秒：一条波前从地平线走到画面底部
-  depthPower: 2.15,
-  //           y = horizon + (H - horizon)·depth^p（近处行距更大）
-  ampFar: 4e-3,
-  //              振幅（占海面高度比）——地平线附近几乎是平的
-  ampNear: 0.075,
-  //             最靠前的浪
-  ampGuard: 0.55,
-  //             振幅不超过「到下一条波前间距」的这个比例（防穿插）
-  waveGrow: 0.85,
-  //             近处横向波数乘这个（波长随 depth 变大，但别长到看不出起伏）
-  overlap: 1.4,
-  //               浪面的带高 = 到下一条波前间距 × 这个（>1 会重叠，近的盖住远的）
-  foamStep: 0.035,
-  //            泡沫沿波前的采样步长（占画面宽）
-  foamSize: 5.6,
-  //              泡沫斑块基准半高（px，1280 基准）
-  breakDepth: 0.78,
-  //           超过它进入 breaking（= 画面下 22%）
-  tiltMax: 0.022,
-  //             每条波前的低频倾斜幅度（占海面高度比，±）
-  phaseShell: 2.6,
-  //            横向相位错开幅度（rad，±）—— 相邻浪脊不同步，必须接近一整个周期
-  grainPx: 2,
-  //               地平线碎纹振幅（px）
-  grainDepth: 0.25,
-  //           碎纹只加在 depth 小于它的区域（= 地平线附近 1/4 屏）
-  bandLight: 0.11,
-  //            浪面内部的横向明暗幅度（互相遮蔽感）
-  foamAspect: 5.5,
-  //            泡沫长宽比（横向至少 4:1，贴着浪脊拉长）
-  foamAlphaMax: 0.5,
-  //          泡沫最大不透明度（太亮就像棉花）
-  foamVisible: 0.22
-  //          低于它就算「不明显」的底层白气
-});
-function depthToY(depth, H, horizonY) {
-  return horizonY + Math.max(0, H - horizonY) * Math.pow(clamp012(depth), SURF.depthPower);
-}
-function waveFronts(t, H, horizonY) {
-  const scroll = t / SURF.period;
-  const span = Math.max(1, H - horizonY);
-  const list = [];
-  for (let i = 0; i < SURF.fronts; i += 1) {
-    const raw = i / SURF.fronts + scroll;
-    const serial = Math.floor(raw);
-    const depth = raw - serial;
-    list.push({
-      i,
-      serial,
-      depth: Math.max(1e-4, depth),
-      y: depthToY(depth, H, horizonY),
-      key: serial * 0.37 + i * 1.91
-    });
-  }
-  list.sort((a, b) => a.y - b.y);
-  for (let k = 0; k < list.length; k += 1) {
-    const front = list[k];
-    const nextY = k + 1 < list.length ? list[k + 1].y : H;
-    const gap = Math.max(2, nextY - front.y);
-    let amp = span * lerp(SURF.ampFar, SURF.ampNear, Math.pow(front.depth, 0.85));
-    amp *= 0.86 + 0.28 * hash1(front.key);
-    front.breaking = front.depth >= SURF.breakDepth;
-    if (front.breaking) {
-      const bulge = 0.5 + 0.5 * Math.sin(TAU * L4.freq * t + hash1(front.key + 2.2) * TAU);
-      amp *= 1 + 0.4 * bulge;
-      front.bulge = bulge;
-    }
-    front.amp = Math.min(amp, gap * SURF.ampGuard);
-    front.waveScale = lerp(1, SURF.waveGrow, front.depth) * (0.82 + 0.36 * hash1(front.serial * 11.7 + front.i * 5.3));
-    front.phase = hash1(front.key + 7.7) * TAU;
-    const hTilt = hash1(front.serial * 3.11 + front.i * 7.77);
-    const hShift = hash1(front.serial * 5.93 + front.i * 2.31);
-    front.tiltPx = (hTilt - 0.5) * 2 * SURF.tiltMax * span * (0.3 + 0.7 * front.depth);
-    front.shift = (hShift - 0.5) * 2 * SURF.phaseShell;
-    front.envA = hash1(front.serial * 9.17 + front.i * 4.13) * TAU;
-    front.envB = hash1(front.serial * 1.37 + front.i * 8.19) * TAU;
-    front.jitterY = (hash1(front.serial * 7.31 + front.i * 3.17) - 0.5) * 0.44 * gap;
-    front.grainPx = SURF.grainPx * clamp012(1 - front.depth / SURF.grainDepth);
-  }
-  return list;
-}
-function crestOffset(front, u01, t) {
-  const breathe = Math.sin(t * 0.13 + front.depth * 2.6) * 0.12;
-  let value = 0;
-  for (let j = 0; j < 3; j += 1) {
-    const waves = L2.waves[j] * front.waveScale;
-    value += Math.sin(TAU * u01 * waves + front.phase + num2(front.shift, 0) + j * L2.phaseGap + breathe * (j + 1)) * L2.weights[j];
-  }
-  const detail = 4.5 + 2.5 * front.depth;
-  value += Math.sin(TAU * u01 * detail + front.phase * 2.3 + num2(front.shift, 0) * 2 + breathe * 2) * 0.06;
-  value += Math.sin(TAU * u01 * (detail * 3.1) - front.phase * 1.4) * 0.03;
-  return clamp2(value, -1.35, 1.35);
-}
-function crestY(front, u01, t) {
-  const tilt = (u01 - 0.5) * num2(front.tiltPx, 0);
-  const grainPx = num2(front.grainPx, 0);
-  let grain = 0;
-  if (grainPx > 0.01) {
-    grain = grainPx * (Math.sin(TAU * u01 * 37 + front.phase * 3.1) * 0.6 + Math.sin(TAU * u01 * 71 - front.phase * 1.7) * 0.4);
-  }
-  return front.y + num2(front.jitterY, 0) - front.amp * crestOffset(front, u01, t) + tilt + grain;
-}
-function drawSurf(ctx, W, H, t, pal, tideN, px) {
-  const horizonY = H * HORIZON2 + tideN * H * 6e-3;
-  const fronts = waveFronts(t, H, horizonY);
-  const exposure = clamp012(pal.exposure);
-  const light = 0.35 + 0.65 * exposure;
-  const skyMirror = mix(pal.skyBottom, pal.seaFar, 0.35);
-  const deep = mix(pal.seaNear, pal.seaMid, 0.15);
-  const troughTint = mix(pal.seaNear, "#02040a", 0.55);
-  const crestTint = mix(pal.foam, pal.horizonGlow, 0.45);
-  const steps = Math.max(36, Math.round(W / 14));
-  const STOPS = 28;
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    const nextY = k + 1 < fronts.length ? fronts[k + 1].y : H;
-    const gap = Math.max(3, nextY - front.y);
-    const bandH = Math.max(6, gap * SURF.overlap);
-    const reflect = clamp012(1 - front.depth) * lerp(0.42, 0.84, 1 - exposure);
-    const water = mix(deep, skyMirror, reflect);
-    const frontLight = 0.7 + 0.55 * hash1(front.key + 11.1);
-    const crestColor = mix(water, crestTint, (0.09 + 0.3 * front.depth) * light * frontLight);
-    const midColor = mix(water, troughTint, 0.14 + 0.16 * front.depth);
-    const troughColor = mix(water, troughTint, 0.3 + 0.18 * front.depth);
-    const bottomY = Math.min(H + bandH, front.y + gap * 1.15);
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t) - front.amp * 0.5;
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    ctx.lineTo(W, bottomY);
-    ctx.lineTo(0, bottomY);
-    ctx.closePath();
-    const faceTop = Math.max(0, front.y - front.amp * 1.05);
-    const face = ctx.createLinearGradient(0, faceTop, 0, bottomY);
-    face.addColorStop(0, rgba(crestColor, 0.25));
-    face.addColorStop(0.14, rgba(crestColor, 0.95));
-    face.addColorStop(0.45, midColor);
-    face.addColorStop(1, troughColor);
-    ctx.fillStyle = face;
-    ctx.fill();
-    const occl = ctx.createLinearGradient(0, 0, W, 0);
-    for (let s0 = 0; s0 < 8; s0 += 1) {
-      const u0 = s0 / 8;
-      const k2 = 0.5 + 0.5 * Math.sin(TAU * 2.1 * u0 + front.envA * 1.7);
-      occl.addColorStop(u0, rgba(troughTint, SURF.bandLight * (0.35 + 0.65 * k2)));
-    }
-    occl.addColorStop(1, rgba(troughTint, 0.02));
-    ctx.fillStyle = occl;
-    ctx.fill();
-    const sheen = ctx.createLinearGradient(0, 0, W, 0);
-    for (let s0 = 0; s0 < STOPS; s0 += 1) {
-      const u0 = s0 / STOPS;
-      const u1 = (s0 + 1) / STOPS;
-      const patch = (hash1(front.key + s0 * 3.7) - 0.5) * 0.85;
-      const h = crestOffset(front, (u0 + u1) / 2, t) + patch;
-      const env = Math.pow(0.5 + 0.5 * Math.sin(TAU * 3.1 * u0 + front.envA) * Math.sin(TAU * 1.7 * u0 + front.envB), 1.7);
-      const a = clamp012(0.34 + 0.66 * h) * env;
-      sheen.addColorStop(clamp012(u0), rgba(mix(water, crestTint, (0.3 + 0.45 * front.depth) * light), (0.05 + 0.3 * front.depth) * light * a * frontLight));
-    }
-    sheen.addColorStop(1, rgba(mix(water, crestTint, 0.3 * light), 0.02));
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t);
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    const hlThick = Math.max(1.5, front.amp * (0.3 + 0.22 * front.depth));
-    for (let s0 = steps; s0 >= 0; s0 -= 1) {
-      const u = s0 / steps;
-      ctx.lineTo(u * W, crestY(front, u, t) + hlThick);
-    }
-    ctx.closePath();
-    ctx.fillStyle = sheen;
-    ctx.fill();
-    ctx.beginPath();
-    for (let s0 = 0; s0 <= steps; s0 += 1) {
-      const u = s0 / steps;
-      const y = crestY(front, u, t);
-      if (s0 === 0) ctx.moveTo(u * W, y);
-      else ctx.lineTo(u * W, y);
-    }
-    ctx.strokeStyle = sheen;
-    ctx.lineWidth = (0.4 + 1.1 * front.depth) * px;
-    ctx.stroke();
-    if (front.breaking) drawBreakingFace(ctx, W, H, pal, t, front, px);
-  }
-  return fronts;
-}
-function whitecapEnvelope(t) {
-  const period = L4.eventPeriod;
-  const phase = (t % period + period) % period / period;
-  if (phase < L4.eventRise) return clamp012(phase / L4.eventRise);
-  const decay = (phase - L4.eventRise) / L4.eventDecay;
-  return decay >= 1 ? 0 : clamp012(1 - decay);
-}
-function drawBreakingFace(ctx, W, H, pal, t, front, px) {
-  void H;
-  const steps = Math.max(24, Math.round(W / 20));
-  const bulge = clamp012(num2(front.bulge, 0.5));
-  const burst = whitecapEnvelope(t);
-  const strength = clamp012(0.25 + 0.55 * bulge + 0.5 * burst);
-  const crestTint = mix(pal.foam, pal.horizonGlow, 0.35);
-  const shadeDepth = (0.045 + 0.03 * front.depth) * H;
-  ctx.beginPath();
-  for (let s = 0; s <= steps; s += 1) {
-    const u = s / steps;
-    ctx.lineTo(u * W, crestY(front, u, t));
-  }
-  ctx.lineTo(W, crestY(front, 1, t) - shadeDepth);
-  ctx.lineTo(0, crestY(front, 0, t) - shadeDepth);
-  ctx.closePath();
-  const shade = ctx.createLinearGradient(0, front.y - front.amp - shadeDepth, 0, front.y);
-  shade.addColorStop(0, rgba("#04070f", 0));
-  shade.addColorStop(1, rgba("#04070f", 0.18 + 0.24 * strength));
-  ctx.fillStyle = shade;
-  ctx.fill();
-  ctx.beginPath();
-  for (let s = 0; s <= steps; s += 1) {
-    const u = s / steps;
-    const h = crestOffset(front, u, t);
-    const thick = front.amp * (0.12 + 0.5 * clamp012(h)) * (0.5 + 0.9 * strength);
-    ctx.lineTo(u * W, crestY(front, u, t) + thick);
-  }
-  for (let s = steps; s >= 0; s -= 1) {
-    const u = s / steps;
-    ctx.lineTo(u * W, crestY(front, u, t) - front.amp * 0.06);
-  }
-  ctx.closePath();
-  const foam = ctx.createLinearGradient(0, front.y - front.amp * 0.2, 0, front.y + front.amp * 0.7);
-  foam.addColorStop(0, rgba(crestTint, clamp012(0.3 * strength)));
-  foam.addColorStop(0.55, rgba(crestTint, clamp012(0.62 * strength)));
-  foam.addColorStop(1, rgba(crestTint, clamp012(0.1 * strength)));
-  ctx.fillStyle = foam;
-  ctx.fill();
-  if (burst > 0.05) {
-    const centerU = clamp2(0.5 + 0.32 * Math.sin(t * 0.19), 0.08, 0.92);
-    const width = (0.1 + 0.07 * front.depth) * W;
-    ctx.fillStyle = rgba(crestTint, clamp012(0.5 * burst));
-    for (let i = 0; i < 4; i += 1) {
-      const u = clamp2(centerU + (hash1(i * 4.3 + front.serial) - 0.5) * 0.12, 0.02, 0.98);
-      const y = crestY(front, u, t) + front.amp * (0.08 + 0.3 * hash1(i * 2.1 + front.key));
-      blob(ctx, u * W, y, width * (0.12 + 0.2 * hash1(i * 7.3)), Math.max(1, front.amp * 0.18 * (0.7 + hash1(i * 3.9))));
-    }
-  }
-  void px;
-}
-function surfTexture(ctx, W, H, t, pal, tideN, px, fronts) {
-  const horizonY = H * HORIZON2 + tideN * H * 6e-3;
-  const exposure = clamp012(pal.exposure);
-  const count = Math.round(clamp2(W / 3.2, 200, 700));
-  const skyMirror = mix(pal.skyBottom, pal.seaFar, 0.35);
-  const deep = mix(pal.seaNear, pal.seaMid, 0.15);
-  const lightTint = mix(pal.foam, pal.horizonGlow, 0.35);
-  const darkTint = mix(pal.seaNear, "#02040a", 0.6);
-  for (let i = 0; i < count; i += 1) {
-    const r1 = hash1(i * 1.7 + 0.31);
-    const r2 = hash1(i * 3.9 + 0.77);
-    const r3 = hash1(i * 7.1 + 0.13);
-    const depth = Math.pow(r1, 1.7) * 0.98 + 0.01;
-    const y = depthToY(depth, H, horizonY) + (r2 - 0.5) * H * 6e-3;
-    if (y < horizonY || y > H) continue;
-    const u = r3;
-    let near = 0;
-    for (let k = 0; k < fronts.length; k += 1) {
-      const front = fronts[k];
-      if (Math.abs(front.depth - depth) > 0.06) continue;
-      const h = crestOffset(front, u, t);
-      if (h > 0) near = Math.max(near, h);
-    }
-    const water = mix(deep, skyMirror, clamp012(1 - depth) * lerp(0.42, 0.84, 1 - exposure));
-    const bright = hash1(i * 11.3 + t * 0.13) > 0.42;
-    const alpha = (0.07 + 0.26 * near) * (0.4 + 0.6 * exposure) * (0.5 + 0.5 * r2);
-    if (alpha <= 0.02) continue;
-    ctx.fillStyle = rgba(bright ? mix(water, lightTint, 0.5) : darkTint, alpha);
-    const w = (1 + 2.4 * r2) * px * (0.7 + 1.2 * depth);
-    ctx.fillRect(u * W, y, w, Math.max(0.7, 0.9 * px));
-  }
-}
-function surfFoam(ctx, W, H, t, pal, tideN, px, fronts) {
-  const exposure = clamp012(pal.exposure);
-  const coverage = clamp2(lerp(L3.coverageMin, L3.coverageMax, clamp012(0.55 + 0.45 * tideN)), L3.coverageMin, L3.coverageMax);
-  const foamTint = mix(pal.foam, pal.horizonGlow, 0.4);
-  const step = Math.max(0.012, SURF.foamStep);
-  const alphaBase = clamp012(0.35 + 0.75 * exposure);
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    const gate = 0.55 - 0.5 * coverage * 6;
-    const density = 0.12 + coverage * 1.6;
-    const slots = Math.max(20, Math.round(1 / step));
-    for (let s0 = 0; s0 < slots; s0 += 1) {
-      const pick = hash1(front.key * 5.3 + s0 * 1.37);
-      if (pick > density) continue;
-      const u = clamp012((s0 + 0.5 + (hash1(front.key * 2.9 + s0 * 2.7) - 0.5) * 2.6) / slots);
-      const h = crestOffset(front, u, t);
-      if (h < gate) continue;
-      const jitter = hash1(front.key * 4.1 + s0 * 3.3);
-      const x = (u + (jitter - 0.5) * step * 0.6) * W;
-      const life = 0.55 + 0.45 * Math.sin(t * TAU * 0.23 + u * 9 + front.depth * 4);
-      const scale = 0.55 + 0.9 * hash1(front.key + u * 13);
-      const alpha = Math.min(
-        SURF.foamAlphaMax,
-        clamp012((h - gate) / (1 - gate)) * alphaBase * (0.55 + 0.35 * front.depth) * (0.6 + 0.4 * life)
-      );
-      if (alpha <= 0.03) continue;
-      const y0 = crestY(front, u, t) + front.amp * 0.06;
-      const height = Math.max(0.8, SURF.foamSize * px * (0.55 + 0.9 * front.depth) * scale);
-      const width = height * (SURF.foamAspect + 1.5 * front.depth);
-      ctx.fillStyle = rgba(foamTint, alpha);
-      blob(ctx, x, y0, width, height);
-      ctx.fillStyle = rgba(foamTint, alpha * 0.34);
-      blob(ctx, x + width * 0.1, y0 + height * 1.9, width * 0.45, Math.max(0.6, height * 0.5));
-    }
-    for (let k2 = 0; k2 < 3; k2 += 1) {
-      const u2 = clamp012(hash1(front.key * 6.1 + k2 * 17.3) * 0.8 + 0.1);
-      const h2 = crestOffset(front, u2, t);
-      if (h2 < gate - 0.25) continue;
-      const breathe2 = 0.5 + 0.5 * Math.sin(t * TAU * 0.19 + k2 * 2.1 + front.depth * 3);
-      ctx.fillStyle = rgba(foamTint, 0.05 + 0.04 * breathe2);
-      blob(
-        ctx,
-        u2 * W,
-        crestY(front, u2, t) + front.amp * 0.04,
-        W * (0.055 + 0.05 * front.depth),
-        Math.max(0.9, SURF.foamSize * px * 0.3 * (0.7 + 0.8 * front.depth))
-      );
-    }
-  }
-}
-function surfSpecular(ctx, W, H, t, pal, fronts, px) {
-  const body = pal.sun || pal.moon;
-  if (!body) return;
-  const sunU = clamp2(body.x, 0, 1);
-  const floorY = pal.sun ? 0.34 : 0.1;
-  const spanK = pal.sun ? 0.18 : 0.3;
-  const intensity = clamp012((body.y - floorY) / spanK) * clamp012(body.alpha);
-  if (intensity <= 0.05) return;
-  const tint = pal.sun ? mix(pal.horizonGlow, "#ffffff", 0.62) : mix(pal.moon.color, "#ffffff", 0.45);
-  const step = Math.max(0.02, SURF.foamStep * 0.7);
-  const eps = 4e-3;
-  for (let k = 0; k < fronts.length; k += 1) {
-    const front = fronts[k];
-    if (front.depth < 0.04) continue;
-    for (let u = 0; u < 1; u += step) {
-      const h = crestOffset(front, u, t);
-      if (h < 0.3) continue;
-      const slope = (crestOffset(front, u + eps, t) - crestOffset(front, u - eps, t)) / (2 * eps);
-      const facing = clamp012(0.5 + 0.5 * slope * (u < sunU ? 1 : -1));
-      const nearSun = 1 - Math.min(1, Math.abs(u - sunU) * 1.6);
-      const seed = hash1(front.key * 3.3 + u * 71);
-      const twinkle = Math.pow(0.5 + 0.5 * Math.sin(t * (1.2 + seed * 3.4) + u * 33), 3);
-      const alpha = intensity * facing * (0.3 + 0.7 * nearSun) * (0.18 + 0.82 * twinkle) * (0.35 + 0.55 * front.depth);
-      if (alpha <= 0.03) continue;
-      ctx.fillStyle = rgba(tint, alpha);
-      blob(
-        ctx,
-        u * W,
-        crestY(front, u, t) + front.amp * 0.06,
-        (1.1 + 3.2 * front.depth) * (0.55 + 0.8 * twinkle) * px,
-        Math.max(0.7, (0.6 + 0.9 * front.depth) * px)
-      );
-    }
-  }
 }
 function gradeOf(media) {
   if (!media || typeof media !== "object") return 0.55;
   const flat = media.grade !== void 0 ? media.grade : media.settings && media.settings.grade;
-  return clamp012(num2(flat, 0.55));
+  return clamp013(num2(flat, 0.55));
 }
 function motionOf(media) {
   if (!media || typeof media !== "object") return 0.5;
   const flat = media.motion !== void 0 ? media.motion : media.settings && media.settings.motion;
-  return clamp012(num2(flat, 0.5));
+  return clamp013(num2(flat, 0.5));
 }
 function hashString(text) {
   const source = typeof text === "string" ? text : "";
@@ -1004,7 +800,7 @@ function withComposite(ctx, op, paint) {
   }
 }
 function compositeFill(ctx, op, color, alpha, W, H) {
-  const a = clamp012(alpha);
+  const a = clamp013(alpha);
   if (a <= 3e-3) return;
   withComposite(ctx, op, () => {
     ctx.fillStyle = rgba(color, a);
@@ -1012,20 +808,20 @@ function compositeFill(ctx, op, color, alpha, W, H) {
   });
 }
 function drawMediaGrade(ctx, W, H, pal, grade) {
-  const g = clamp012(grade);
+  const g = clamp013(grade);
   if (g <= 0.01) return;
-  const exposure = clamp012(pal.exposure);
+  const exposure = clamp013(pal.exposure);
   const lowSun = 1 - exposure;
-  const darkness = clamp012((0.95 - exposure) / 0.65);
-  const tint = mix(pal.seaMid, pal.horizonGlow, clamp012(0.2 + 0.75 * lowSun));
-  const shade = mix(tint, "#03060e", clamp012(0.4 + 0.55 * darkness));
-  compositeFill(ctx, "multiply", shade, clamp012(g * (0.08 + 0.9 * darkness)), W, H);
-  if (darkness > 0.2) compositeFill(ctx, "multiply", "#04070f", clamp012(g * 0.4 * (darkness - 0.2) / 0.8), W, H);
-  compositeFill(ctx, "screen", mix(pal.horizonGlow, "#ffffff", 0.5), clamp012(g * (0.1 + 0.16 * exposure)), W, H);
-  compositeFill(ctx, "soft-light", tint, clamp012(g * 0.55), W, H);
+  const darkness = clamp013((0.95 - exposure) / 0.65);
+  const tint = mix(pal.seaMid, pal.horizonGlow, clamp013(0.2 + 0.75 * lowSun));
+  const shade = mix(tint, "#03060e", clamp013(0.4 + 0.55 * darkness));
+  compositeFill(ctx, "multiply", shade, clamp013(g * (0.08 + 0.9 * darkness)), W, H);
+  if (darkness > 0.2) compositeFill(ctx, "multiply", "#04070f", clamp013(g * 0.4 * (darkness - 0.2) / 0.8), W, H);
+  compositeFill(ctx, "screen", mix(pal.horizonGlow, "#ffffff", 0.5), clamp013(g * (0.1 + 0.16 * exposure)), W, H);
+  compositeFill(ctx, "soft-light", tint, clamp013(g * 0.55), W, H);
 }
 function drawMediaSkyMask(ctx, W, H, pal, grade) {
-  const g = clamp012(grade);
+  const g = clamp013(grade);
   if (g <= 0.01) return;
   const bottom = H * MEDIA.skyMaskBottom;
   const shade = ctx.createLinearGradient(0, 0, 0, bottom);
@@ -1048,7 +844,7 @@ function drawMediaSweep(ctx, W, H, pal, t, motion, grade) {
   const bandHeight = H * MEDIA.sweepHeight;
   const y = -bandHeight + phase * (H + bandHeight * 2);
   const strength = Math.sin(Math.PI * phase);
-  const alpha = 0.05 * strength * (0.45 + 0.75 * clamp012(grade)) * (0.5 + 0.5 * clamp012(motion));
+  const alpha = 0.05 * strength * (0.45 + 0.75 * clamp013(grade)) * (0.5 + 0.5 * clamp013(motion));
   if (alpha <= 4e-3) return;
   const sweep = ctx.createLinearGradient(0, y, 0, y + bandHeight);
   sweep.addColorStop(0, rgba(pal.foam, 0));
@@ -1060,7 +856,7 @@ function drawMediaSweep(ctx, W, H, pal, t, motion, grade) {
   });
 }
 function drawVignette(ctx, W, H, strength) {
-  const s = clamp012(strength);
+  const s = clamp013(strength);
   if (s <= 0.01) return;
   const gradient = ctx.createRadialGradient(W * 0.5, H * 0.46, Math.min(W, H) * 0.34, W * 0.5, H * 0.5, Math.max(W, H) * 0.78);
   gradient.addColorStop(0, "rgba(0,0,0,0)");
@@ -1084,18 +880,18 @@ function renderMediaScene(ctx, W, H, t, pal, asset, media, warmth) {
   if (!iw || !ih) return false;
   const motion = motionOf(media);
   const grade = gradeOf(media);
-  const seed = clamp012(num2(asset.seed, 0));
+  const seed = clamp013(num2(asset.seed, 0));
   const phase = ((t / MEDIA.kenBurnsPeriod + seed) % 1 + 1) % 1;
-  const ease = 0.5 - 0.5 * Math.cos(TAU * phase);
+  const ease = 0.5 - 0.5 * Math.cos(TAU2 * phase);
   const zoom = MEDIA.overscan + MEDIA.kenBurnsZoom * motion * (0.35 + 0.65 * ease);
   const scale = Math.max(W / iw, H / ih) * zoom;
   const dw = Math.max(W + 2, iw * scale);
   const dh = Math.max(H + 2, ih * scale);
   const marginX = Math.max(0, (dw - W) / 2);
   const marginY = Math.max(0, (dh - H) / 2);
-  const panX = marginX * 0.8 * motion * Math.sin(TAU * phase + seed * TAU);
-  const panY = marginY * 0.5 * motion * Math.cos(TAU * phase * 0.71 + seed * 5.1);
-  const breath = motion > 0.02 ? Math.sin(TAU * MEDIA.breathFreq * t) * MEDIA.breathPx * (0.4 + 0.6 * motion) : 0;
+  const panX = marginX * 0.8 * motion * Math.sin(TAU2 * phase + seed * TAU2);
+  const panY = marginY * 0.5 * motion * Math.cos(TAU2 * phase * 0.71 + seed * 5.1);
+  const breath = motion > 0.02 ? Math.sin(TAU2 * MEDIA.breathFreq * t) * MEDIA.breathPx * (0.4 + 0.6 * motion) : 0;
   const dx = (W - dw) / 2 + clamp2(panX + breath, -marginX, marginX);
   const dy = (H - dh) / 2 + clamp2(panY, -marginY, marginY);
   ctx.drawImage(el, dx, dy, dw, dh);
@@ -1110,7 +906,7 @@ function renderMediaScene(ctx, W, H, t, pal, asset, media, warmth) {
   return true;
 }
 var lastRenderTime = 0;
-function renderScene(ctx, W, H, t, pal, tideN, warmth) {
+function renderScene(ctx, W, H, t, pal, tideN, warmth, field2) {
   lastRenderTime = t;
   const px = clamp2(H / 720, 0.65, 1.8);
   const nearLift = tideN * H * 6e-3;
@@ -1124,11 +920,17 @@ function renderScene(ctx, W, H, t, pal, tideN, warmth) {
   drawStars(ctx, W, H, horizonY, pal, t);
   drawSun(ctx, W, H, pal);
   drawMoon(ctx, W, H, pal);
-  drawFarSea(ctx, W, H, horizonY, pal, t, px);
-  const fronts = drawSurf(ctx, W, H, t, pal, tideN, px);
-  surfTexture(ctx, W, H, t, pal, tideN, px, fronts);
-  surfFoam(ctx, W, H, t, pal, tideN, px, fronts);
-  surfSpecular(ctx, W, H, t, pal, fronts, px);
+  let drawn = false;
+  if (field2) {
+    try {
+      drawn = drawWater(ctx, { W, H, horizonY, t, pal, tideN }, field2);
+    } catch (_error) {
+      drawn = false;
+    }
+  }
+  if (!drawn) {
+    drawFarSea(ctx, W, H, horizonY, pal, t, px);
+  }
   if (warmth) {
     ctx.fillStyle = rgba(warmth > 0 ? "#ffb066" : "#6fa8ff", Math.abs(warmth) * 0.9);
     ctx.fillRect(0, 0, W, H);
