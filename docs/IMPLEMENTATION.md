@@ -302,3 +302,37 @@ v3 把 L1–L4 整段重构成一个 surf-zone 模型：
 旧的 surf 代码（`SURF` 常量组、`waveFronts`、`crestY`、`drawSurf`、`surfFoam`、`surfSpecular`、
 `drawBreakingFace`、`whitecapEnvelope`、`L1`–`L4` 常量、`blob()`）已全部删除，
 `sea-canvas.jsx` 从 1667 行降到 1269 行；程序化路径只剩"天气 + 斑块场 + 碎光 + 雾带"。
+
+---
+
+## 十二、v0.1.2：一次"代码没问题、但没接上"的事故
+
+用户反馈 v0.1.1：「波浪都没有了吗？也没有随机分布的斑块」。
+
+### 12.1 根因
+
+`water.js` 是对的，问题在 `sea-canvas.jsx` 的**接线**：我改了两处调用，但两处 `String.replace`
+都没匹配上目标（一处参数表、一处调用点），于是：
+
+- `state.field` 从未被创建（永远是 `undefined`）；
+- `renderScene(...)` 调用时也没把缓冲传进去。
+
+`renderScene` 里 `if (field) drawWater(...) else drawFarSea(...)` —— 于是**每一帧都走了兜底**，
+画面是 `drawFarSea` 那版最简单的远景渐变：没有浪、没有斑块。
+
+最刺眼的是：**所有测试都是绿的**。因为它们只测 `water.js` 本身，和组件怎么调它无关；
+而我做视觉验收时用的是 harness，harness 自己建了 field 传进去 —— 恰好绕开了坏掉的那条路径。
+
+### 12.2 三重修复
+
+1. **接上**：`state` 初始化时创建 `field`，真实调用点补上第 8 个参数 `state.field`；
+2. **兜底再兜底**：`renderScene` 里加 `resolveField()`，调用方不传就懒建一份——
+   让"漏接一根线"退化成"多用一份缓冲"，而不是"没有海"；
+3. **加接线测试** `test/wiring.test.js`（5 条）：断言 import 存在、`drawWater` 真被调用、
+   **真实调用点那一行必须以 `state.field` 结尾**、兜底分支存在、旧 surf 代码确实已删除。
+
+### 12.3 复验
+
+- 回归渲染：**故意不传 field** 调用 `renderScene`，画面依然是斑块海（证明兜底生效）；
+- 全量 `node --test`：**121 条全绿**；
+- 打包：`dsh-intertidal-0.1.2.tgz`。

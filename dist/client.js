@@ -372,6 +372,10 @@ function hexToRgb(hex) {
 }
 var clamp012 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
 var lerp = (a, b, t) => a + (b - a) * t;
+function createWaterField(doc = globalThis.document) {
+  const canvas = doc?.createElement?.("canvas") ?? null;
+  return { width: 0, height: 0, canvas, ctx: canvas?.getContext?.("2d") ?? null, image: null, h: null };
+}
 function ensureSize(field2, width, height) {
   if (field2.width === width && field2.height === height && field2.image) return true;
   field2.width = width;
@@ -906,8 +910,21 @@ function renderMediaScene(ctx, W, H, t, pal, asset, media, warmth) {
   return true;
 }
 var lastRenderTime = 0;
+var lazyWaterField = null;
+function resolveField(field2) {
+  if (field2) return field2;
+  if (!lazyWaterField) {
+    try {
+      lazyWaterField = createWaterField(typeof document !== "undefined" ? document : void 0);
+    } catch (_error) {
+      lazyWaterField = null;
+    }
+  }
+  return lazyWaterField;
+}
 function renderScene(ctx, W, H, t, pal, tideN, warmth, field2) {
   lastRenderTime = t;
+  field2 = resolveField(field2);
   const px = clamp2(H / 720, 0.65, 1.8);
   const nearLift = tideN * H * 6e-3;
   const horizonY = H * HORIZON2 + nearLift;
@@ -1019,7 +1036,16 @@ function SeaCanvas({ now, media, form, paused, reducedMotion, onStats }) {
       degraded: false,
       mediaCap: false,
       //         媒体就绪 → 缓冲上限提到 2560
-      staticStep: 0
+      staticStep: 0,
+      // 水面斑块场的低分辨率高度场缓冲：挂载时建一次，整个生命周期复用。
+      // 建不出来就是 null，renderScene 会退回 drawFarSea（简单的远景渐变），不会留白。
+      field: (() => {
+        try {
+          return createWaterField(typeof document !== "undefined" ? document : void 0);
+        } catch (_error) {
+          return null;
+        }
+      })()
     };
     try {
       state.ctx = canvas.getContext("2d", { alpha: false });
@@ -1224,7 +1250,7 @@ function SeaCanvas({ now, media, form, paused, reducedMotion, onStats }) {
         if (drewMedia) return;
       }
       try {
-        renderScene(state.ctx, state.w, state.h, t, pal, tideNormalized(), warmth);
+        renderScene(state.ctx, state.w, state.h, t, pal, tideNormalized(), warmth, state.field);
       } catch (_error) {
         state.ctx = null;
         try {

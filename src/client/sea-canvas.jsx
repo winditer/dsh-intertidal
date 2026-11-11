@@ -531,8 +531,26 @@ export function __lastRenderTime() {
   return lastRenderTime;
 }
 
+// 兜底的兜底：调用方忘了传 field 也照样能画。
+// （v0.1.1 的事故正是"调用点漏传"— 于是每帧都走 drawFarSea，画面是平的。这里懒建一份缓冲，
+//   让"漏接一根线"退化成"多用一份内存"，而不是"没有海"。）
+let lazyWaterField = null;
+
+function resolveField(field) {
+  if (field) return field;
+  if (!lazyWaterField) {
+    try {
+      lazyWaterField = createWaterField(typeof document !== 'undefined' ? document : undefined);
+    } catch (_error) {
+      lazyWaterField = null;
+    }
+  }
+  return lazyWaterField;
+}
+
 function renderScene(ctx, W, H, t, pal, tideN, warmth, field) {
   lastRenderTime = t;
+  field = resolveField(field);
   const px = clamp(H / 720, 0.65, 1.8);
   const nearLift = tideN * H * 0.006; // 潮位只让水位线轻微起伏，不喧宾夺主
   const horizonY = H * HORIZON + nearLift;
@@ -676,6 +694,15 @@ export default function SeaCanvas({ now, media, form, paused, reducedMotion, onS
       degraded: false,
       mediaCap: false, //         媒体就绪 → 缓冲上限提到 2560
       staticStep: 0,
+      // 水面斑块场的低分辨率高度场缓冲：挂载时建一次，整个生命周期复用。
+      // 建不出来就是 null，renderScene 会退回 drawFarSea（简单的远景渐变），不会留白。
+      field: (() => {
+        try {
+          return createWaterField(typeof document !== 'undefined' ? document : undefined);
+        } catch (_error) {
+          return null;
+        }
+      })(),
     };
 
     // 2D context：拿不到（或抛错）就退回 CSS 渐变静态海，绝不抛
@@ -949,7 +976,7 @@ export default function SeaCanvas({ now, media, form, paused, reducedMotion, onS
       }
 
       try {
-        renderScene(state.ctx, state.w, state.h, t, pal, tideNormalized(), warmth);
+        renderScene(state.ctx, state.w, state.h, t, pal, tideNormalized(), warmth, state.field);
       } catch (_error) {
         // 绘制异常不外泄：永久退回 CSS 渐变，海还在（只是不再是 canvas 的）
         state.ctx = null;
