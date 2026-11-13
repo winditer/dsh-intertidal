@@ -24,12 +24,22 @@ test('真实月亮可见时用它的真实位置', () => {
   assert.notEqual(pal.moon.x, 0.62, '不该被合成的位置覆盖')
 })
 
-test('白天不补月亮', () => {
-  const pal = paletteFor({ sun: { altitude: 40, azimuth: 200 }, moon: { altitude: -30, azimuth: 20, phase: 0.5 }, tide: { height: 0 }, phase: 'noon' })
-  if (pal.moon) {
-    // 白天月亮若可见（真实位置在天上）可以画，但不允许是"合成补位"的那个位置
-    assert.notEqual(pal.moon.x, 0.62)
+test('白天一律不画月亮（即使真实月亮在地平线以上）', () => {
+  // 现场 bug：太阳和月亮同时挂在天上
+  for (const sunAltitude of [7, 20, 40, 68]) {
+    const pal = paletteFor({
+      sun: { altitude: sunAltitude, azimuth: 200 },
+      moon: { altitude: 35, azimuth: 150, phase: 0.5 },
+      tide: { height: 0 },
+      phase: 'afternoon',
+    })
+    assert.equal(pal.moon, null, `太阳高度 ${sunAltitude}° 时不该有月亮`)
   }
+})
+
+test('晨昏与夜里仍可以有月亮', () => {
+  const dusk = paletteFor({ sun: { altitude: 2, azimuth: 200 }, moon: { altitude: 12, azimuth: 150, phase: 0.5 }, tide: { height: 0 }, phase: 'dusk' })
+  assert.ok(dusk.moon, '黄昏天上有月亮就该画')
 })
 
 test('月相决定亮度：望月比新月亮', () => {

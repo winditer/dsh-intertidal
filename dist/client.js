@@ -299,6 +299,8 @@ function computePalette(now) {
   const sun = sunOf(sunPosition, colors);
   let moon = moonOf(bodyPosition(source.moon), colors, moonPhase);
   const nightish = sunAltitude !== null ? sunAltitude < -6 : (phase || FALLBACK_PHASE) === "night";
+  const daytime = sunAltitude !== null ? sunAltitude > 6 : ["noon", "afternoon"].includes(phase || "");
+  if (daytime) moon = null;
   if (!moon && nightish) {
     const lit = illuminatedFraction(moonPhase);
     moon = {
@@ -3263,7 +3265,9 @@ function clampVolume(value) {
 
 // src/client/styles.js
 var STYLE = `
-:root { --intertidal-z: 900; }
+/* 覆盖层要盖住 DSH 自己的头部按钮（右上角那些），所以取一个极高的值。
+   审批弹窗的风险由 rhythm 的"有对话框就推迟自动浮现"兜住；手动打开时可随时 Esc 退出。 */
+:root { --intertidal-z: 2147483000; }
 
 .it-root {
   position: fixed;
@@ -3384,9 +3388,19 @@ var STYLE = `
 .it-settings { display: flex; flex-direction: column; gap: 26px; max-width: 100%; }
 .it-group { display: flex; flex-direction: column; gap: 4px; }
 .it-group > h4 {
-  margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .06em;
-  text-transform: uppercase; opacity: .55;
+  /* 宿主的 h1–h6 有自己的一套字体/字号，这里必须整体覆盖，否则分组标题会变成第三层"大标题" */
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;   /* 中文没有大小写，uppercase 只会把字距拉得很怪 */
+  text-transform: none;
+  line-height: 1.4;
+  opacity: .48;
+  margin: 0 0 2px;
+  padding: 18px 0 0;
+  border-top: 1px solid rgba(127, 137, 150, .16);
 }
+.it-group:first-child > h4 { padding-top: 0; border-top: none; }
 .it-row {
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: 8px 18px; flex-wrap: wrap;

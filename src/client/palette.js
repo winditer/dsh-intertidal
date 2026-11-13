@@ -346,6 +346,10 @@ function computePalette(now) {
   // 产品的取舍（用户明确要求）。所以夜间且真实月亮不可见时，按同一月相画一轮在天上，
   // 位置和亮度都取保守值 —— 月相仍然来自宿主的朔望周期计算，不是随机数。
   const nightish = sunAltitude !== null ? sunAltitude < -6 : (phase || FALLBACK_PHASE) === 'night';
+  // 白天不画月亮：真实天象里月亮确实常常白天也在天上，但"太阳和月亮同时挂在天上"在画面里
+  // 看着就是 bug（用户反馈过），所以白天一律不画月亮，只在夜/晨昏出现。
+  const daytime = sunAltitude !== null ? sunAltitude > 6 : ['noon', 'afternoon'].includes(phase || '');
+  if (daytime) moon = null;
   if (!moon && nightish) {
     const lit = illuminatedFraction(moonPhase);
     moon = {
